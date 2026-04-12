@@ -1,0 +1,42 @@
+[Unit]
+Description=MetaTrader 5 Bridge Server (Xvfb + Wine + MT5 + mt5linux RPC)
+Documentation=https://github.com/nickoala/mt5linux
+After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=trader
+Group=trader
+
+# Environment
+Environment=WINEPREFIX=/home/trader/.wine
+Environment=WINEARCH=win64
+Environment=DISPLAY=:99
+
+# Working directory
+WorkingDirectory=/home/trader/autotrader
+
+# Start the MT5 bridge (Xvfb + Wine + mt5linux)
+ExecStart=/home/trader/autotrader/systemd/start_mt5_bridge.sh
+
+# Restart policy: always restart, wait 10 seconds between attempts
+Restart=always
+RestartSec=10
+
+# Don't kill child processes on restart (Wine subprocesses)
+KillMode=mixed
+TimeoutStopSec=30
+
+# Resource limits
+LimitNOFILE=65535
+MemoryMax=2G
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mt5-bridge
+
+[Install]
+WantedBy=multi-user.target

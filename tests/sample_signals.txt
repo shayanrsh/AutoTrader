@@ -1,0 +1,103 @@
+# ============================================================================
+# Sample Trading Signals for Parser Testing
+# ============================================================================
+# Each block below represents a real-world signal format commonly seen in
+# Telegram channels. Used by test_parser.py.
+# ============================================================================
+
+# --- Format 1: Clean, structured signal ---
+SIGNAL_001:
+🟢 BUY XAUUSD @ 2345.50
+🛑 SL: 2338.00
+🎯 TP1: 2352.00
+🎯 TP2: 2360.00
+🎯 TP3: 2370.00
+
+# --- Format 2: Minimal signal ---
+SIGNAL_002:
+SELL GOLD 2380
+SL 2388
+TP 2370
+
+# --- Format 3: Entry range ---
+SIGNAL_003:
+Buy XAUUSD
+Entry Zone: 2340-2345
+Stop Loss: 2332
+Take Profit 1: 2355
+Take Profit 2: 2365
+
+# --- Format 4: Emoji-heavy ---
+SIGNAL_004:
+🔥🔥🔥 GOLD SIGNAL 🔥🔥🔥
+💰 SELL XAUUSD
+📈 Entry: 2390.50
+🛑 SL: 2398.00
+🎯 TP: 2382.00
+🎯 TP2: 2375.00
+Lot: 0.05
+
+# --- Format 5: Verbose commentary ---
+SIGNAL_005:
+Good morning traders! Based on our analysis of the ascending channel 
+and the rejection at the 2400 resistance level, we recommend:
+
+BUY XAUUSD at 2356.00
+Stop Loss at 2348.00
+TP1: 2364.00
+TP2: 2372.00
+
+Please manage your risk accordingly! 🙏
+
+# --- Format 6: Not a signal (commentary) ---
+SIGNAL_006:
+Market update: Gold is showing bullish momentum today after the Fed 
+announcement. XAUUSD is currently trading at 2355. We expect a 
+pullback to 2340 before the next move up. Stay tuned for our next signal.
+
+# --- Format 7: Close/update signal (not a new trade) ---
+SIGNAL_007:
+⚠️ UPDATE: Move SL to breakeven on the XAUUSD BUY from earlier.
+TP1 has been hit! Let the rest run to TP2.
+
+# --- Format 8: Using commas in prices ---
+SIGNAL_008:
+SELL XAUUSD at 2,385.50
+SL: 2,393.00
+TP1: 2,378.00
+TP2: 2,370.00
+
+# --- Format 9: Using "Long" and "Short" terminology ---
+SIGNAL_009:
+Go Long XAUUSD
+Entry: 2342
+SL: 2335
+Target 1: 2350
+Target 2: 2358
+Target 3: 2365
+
+# --- Format 10: Random non-signal text ---
+SIGNAL_010:
+Happy New Year everyone! 🎉
+Wishing you all a profitable trading year!
+Remember to always use proper risk management.
+
+# --- Format 11: Price without decimal ---
+SIGNAL_011:
+BUY GOLD @ 2345
+SL 2338
+TP 2355
+
+# --- Format 12: Multi-line with noise ---
+SIGNAL_012:
+📊 PREMIUM SIGNAL 📊
+━━━━━━━━━━━━━━━━━
+Pair: XAUUSD (Gold)
+Direction: SELL 🔴
+Entry Price: 2401.50
+Stop Loss: 2410.00
+Take Profit 1: 2393.00
+Take Profit 2: 2385.00
+Take Profit 3: 2375.00
+Risk: 1% of balance
+━━━━━━━━━━━━━━━━━

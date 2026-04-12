@@ -1,0 +1,52 @@
+[Unit]
+Description=AutoTrader Forex Signal Bot
+Documentation=file:///home/trader/autotrader/docs/DEPLOYMENT.md
+After=mt5-bridge.service network-online.target
+Wants=network-online.target
+Requires=mt5-bridge.service
+
+# Don't start if mt5-bridge fails too many times
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=trader
+Group=trader
+
+# Working directory
+WorkingDirectory=/home/trader/autotrader
+
+# Load environment from config file
+EnvironmentFile=/home/trader/autotrader/config.env
+
+# Run the bot using the virtual environment Python
+ExecStart=/home/trader/autotrader/venv/bin/python -m src.main
+
+# Restart on failure only (not on clean exit)
+Restart=on-failure
+RestartSec=5
+
+# Graceful shutdown timeout
+TimeoutStopSec=30
+
+# Send SIGTERM first, then SIGKILL after timeout
+KillSignal=SIGTERM
+
+# Resource limits
+LimitNOFILE=4096
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/trader/autotrader/data /var/log/autotrader
+PrivateTmp=yes
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=autotrader
+
+[Install]
+WantedBy=multi-user.target
