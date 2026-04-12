@@ -20,7 +20,7 @@ A production-grade, fully automated trading bot that monitors a private Telegram
 ## ⚡ One-Line Install
 
 ```bash
-sudo bash <(curl -Ls https://raw.githubusercontent.com/shayanrsh/AutoTrader/main/install.sh)
+curl -fsSL https://raw.githubusercontent.com/shayanrsh/AutoTrader/main/install.sh | sudo bash
 ```
 
 That's it. The installer handles everything: system packages, Wine, MetaTrader 5, Python environments, firewall, SSH hardening, and systemd services.
@@ -219,7 +219,7 @@ The installer now opens an interactive TUI menu (`whiptail` when available, clea
 
 ```bash
 # Full install (default)
-sudo bash <(curl -Ls https://raw.githubusercontent.com/shayanrsh/AutoTrader/main/install.sh)
+curl -fsSL https://raw.githubusercontent.com/shayanrsh/AutoTrader/main/install.sh | sudo bash
 
 # Or clone and run manually
 git clone https://github.com/shayanrsh/AutoTrader.git

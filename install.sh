@@ -12,7 +12,7 @@
 #  One-line installer for Ubuntu 24.04 LTS
 #
 #  Usage:
-#    bash <(curl -Ls https://raw.githubusercontent.com/shayanrsh/AutoTrader/main/install.sh)
+#    curl -fsSL https://raw.githubusercontent.com/shayanrsh/AutoTrader/main/install.sh | sudo bash
 #
 # ============================================================================
 
@@ -168,7 +168,7 @@ select_mode() {
 preflight() {
     if [[ $EUID -ne 0 ]]; then
         err "This installer must be run as root."
-        echo -e "    Run: ${CYAN}sudo bash <(curl -Ls https://raw.githubusercontent.com/shayanrsh/AutoTrader/main/install.sh)${NC}"
+        echo -e "    Run: ${CYAN}curl -fsSL https://raw.githubusercontent.com/shayanrsh/AutoTrader/main/install.sh | sudo bash${NC}"
         exit 1
     fi
 
