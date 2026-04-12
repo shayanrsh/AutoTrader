@@ -42,7 +42,8 @@ DASHBOARD_CMD="/usr/local/bin/atdash"
 DASHBOARD_SCRIPT="${INSTALL_DIR}/scripts/autotrader-dashboard.sh"
 INSTALLER_CMD="/usr/local/bin/atinstall"
 INSTALLER_SCRIPT="${INSTALL_DIR}/scripts/autotrader-installer.sh"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_PATH="${BASH_SOURCE:-${0:-install.sh}}"
+SCRIPT_DIR="$(cd "$(dirname "${SCRIPT_PATH}")" 2>/dev/null && pwd || pwd)"
 SELF_SCRIPT=""
 
 USE_TUI=0
@@ -95,27 +96,15 @@ has_tty() {
 }
 
 can_use_tui() {
-    has_tty && command -v whiptail >/dev/null 2>&1
+    return 1
 }
 
 ui_init() {
-    if ! command -v whiptail >/dev/null 2>&1 && has_tty; then
-        info "Installing whiptail for interactive TUI..."
-        export DEBIAN_FRONTEND=noninteractive
-        apt-get update -qq >/dev/null 2>&1 || true
-        apt-get install -y -qq whiptail >/dev/null 2>&1 || true
-    fi
-
-    if can_use_tui; then
-        USE_TUI=1
-        log "Interactive TUI enabled"
+    USE_TUI=0
+    if has_tty; then
+        info "Interactive mode available. Using Textual-first installer with text fallback."
     else
-        USE_TUI=0
-        if has_tty; then
-            info "TUI unavailable (whiptail install failed). Using text prompts."
-        else
-            info "TUI unavailable (no interactive TTY). Using text prompts."
-        fi
+        info "No interactive TTY detected. Using non-interactive/text prompts only."
     fi
 }
 
@@ -123,13 +112,9 @@ ui_msg() {
     local title="$1"
     local message="$2"
 
-    if [[ ${USE_TUI} -eq 1 ]]; then
-        whiptail --title "${title}" --msgbox "${message}" 14 74 < /dev/tty > /dev/tty 2>&1
-    else
-        echo ""
-        echo -e "${BOLD}${title}${NC}"
-        echo -e "${message}"
-    fi
+    echo ""
+    echo -e "${BOLD}${title}${NC}"
+    echo -e "${message}"
 }
 
 ui_confirm() {
@@ -138,11 +123,6 @@ ui_confirm() {
 
     if [[ ${NON_INTERACTIVE} -eq 1 ]]; then
         [[ ${ASSUME_YES} -eq 1 ]]
-        return $?
-    fi
-
-    if [[ ${USE_TUI} -eq 1 ]]; then
-        whiptail --title "${title}" --yesno "${message}" 14 74 < /dev/tty > /dev/tty 2>&1
         return $?
     fi
 
@@ -161,11 +141,6 @@ ui_input() {
         return 0
     fi
 
-    if [[ ${USE_TUI} -eq 1 ]]; then
-        whiptail --title "AutoTrader" --inputbox "${prompt}" 11 74 "${default_value}" 3>&1 1>&2 2>&3 < /dev/tty
-        return $?
-    fi
-
     read -r -p "${prompt} [${default_value}]: " value < /dev/tty
     echo "${value:-$default_value}"
 }
@@ -177,11 +152,6 @@ ui_secret_input() {
     if [[ ${NON_INTERACTIVE} -eq 1 ]]; then
         echo "${default_value}"
         return 0
-    fi
-
-    if [[ ${USE_TUI} -eq 1 ]]; then
-        whiptail --title "AutoTrader" --passwordbox "${prompt}" 11 74 "${default_value}" 3>&1 1>&2 2>&3 < /dev/tty
-        return $?
     fi
 
     read -r -s -p "${prompt}: " value < /dev/tty
@@ -202,43 +172,26 @@ select_mode() {
         return 0
     fi
 
-    if [[ ${USE_TUI} -eq 1 ]]; then
-        local choice
-        choice=$(whiptail \
-            --title "AutoTrader — Main Menu" \
-            --menu "Choose an action:" 20 84 12 \
-            "full" "Full install (system deps + Wine + MT5 + app + services)" \
-            "app" "App-only install (code + venv + services)" \
-            "update" "Update project (git pull + venv deps + restart services)" \
-            "setup" "Interactive config wizard (API keys, MT5, risk settings)" \
-            "dashboard" "Launch control dashboard (stats + controls)" \
-            "uninstall" "Uninstall AutoTrader (services, files, commands)" \
-            "quit" "Exit installer" \
-            3>&1 1>&2 2>&3 < /dev/tty) || INSTALL_MODE="quit"
+    echo ""
+    echo -e "${BOLD}Select action:${NC}"
+    echo "  1) Full Install"
+    echo "  2) App Only"
+    echo "  3) Update Project"
+    echo "  4) Interactive Config Wizard"
+    echo "  5) Launch Dashboard"
+    echo "  6) Uninstall Everything"
+    echo "  7) Quit"
+    read -r -p "Choice [1-7]: " choice < /dev/tty
 
-        INSTALL_MODE="${choice:-quit}"
-    else
-        echo ""
-        echo -e "${BOLD}Select action:${NC}"
-        echo "  1) Full Install"
-        echo "  2) App Only"
-        echo "  3) Update Project"
-        echo "  4) Interactive Config Wizard"
-        echo "  5) Launch Dashboard"
-        echo "  6) Uninstall Everything"
-        echo "  7) Quit"
-        read -r -p "Choice [1-7]: " choice < /dev/tty
-
-        case "${choice}" in
-            1) INSTALL_MODE="full" ;;
-            2) INSTALL_MODE="app" ;;
-            3) INSTALL_MODE="update" ;;
-            4) INSTALL_MODE="setup" ;;
-            5) INSTALL_MODE="dashboard" ;;
-            6) INSTALL_MODE="uninstall" ;;
-            *) INSTALL_MODE="quit" ;;
-        esac
-    fi
+    case "${choice}" in
+        1) INSTALL_MODE="full" ;;
+        2) INSTALL_MODE="app" ;;
+        3) INSTALL_MODE="update" ;;
+        4) INSTALL_MODE="setup" ;;
+        5) INSTALL_MODE="dashboard" ;;
+        6) INSTALL_MODE="uninstall" ;;
+        *) INSTALL_MODE="quit" ;;
+    esac
 
     log "Selected action: ${INSTALL_MODE}"
 }
@@ -943,21 +896,25 @@ launch_textual_installer() {
             return 0
         fi
 
-        if [[ -r "${BASH_SOURCE[0]}" ]]; then
-            SELF_SCRIPT="${BASH_SOURCE[0]}"
+        if [[ -f "${0:-}" ]]; then
+            SELF_SCRIPT="${0}"
         elif [[ -r "${SCRIPT_DIR}/install.sh" ]]; then
             SELF_SCRIPT="${SCRIPT_DIR}/install.sh"
         else
-            SELF_SCRIPT="install.sh"
-        fi
-
-        # When invoked via curl | bash, BASH_SOURCE may be a non-persistent fd path.
-        if [[ ! -f "${SELF_SCRIPT}" && -r "${BASH_SOURCE[0]}" ]]; then
             local temp_self
             temp_self="/tmp/autotrader-install-bootstrap.sh"
-            cat "${BASH_SOURCE[0]}" > "${temp_self}"
-            chmod 700 "${temp_self}"
-            SELF_SCRIPT="${temp_self}"
+            if command -v curl >/dev/null 2>&1; then
+                curl -fsSL "https://raw.githubusercontent.com/shayanrsh/AutoTrader/main/install.sh" -o "${temp_self}" || true
+            elif command -v wget >/dev/null 2>&1; then
+                wget -qO "${temp_self}" "https://raw.githubusercontent.com/shayanrsh/AutoTrader/main/install.sh" || true
+            fi
+
+            if [[ -f "${temp_self}" ]]; then
+                chmod 700 "${temp_self}"
+                SELF_SCRIPT="${temp_self}"
+            else
+                SELF_SCRIPT="install.sh"
+            fi
         fi
     }
 
