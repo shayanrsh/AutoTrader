@@ -24,6 +24,7 @@ curl -fsSL https://raw.githubusercontent.com/shayanrsh/AutoTrader/main/install.s
 ```
 
 That's it. The installer handles everything: system packages, Wine, MetaTrader 5, Python environments, firewall, SSH hardening, and systemd services.
+It automatically enables the TUI when `whiptail` is available (and attempts to install it), while still supporting interactive text prompts when TUI isn't possible.
 
 ## 🏗️ Architecture
 

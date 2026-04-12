@@ -62,16 +62,32 @@ err()  { echo -e "${RED}[✗]${NC} $1"; }
 step() { echo -e "\n${MAGENTA}${BOLD}━━━ Step $1: $2 ━━━${NC}"; }
 
 # ── UI Helpers ──────────────────────────────────────────────────────────────
+has_tty() {
+    [[ -r /dev/tty && -w /dev/tty ]]
+}
+
 can_use_tui() {
-    [[ -t 0 && -t 1 ]] && command -v whiptail >/dev/null 2>&1
+    has_tty && command -v whiptail >/dev/null 2>&1
 }
 
 ui_init() {
+    if ! command -v whiptail >/dev/null 2>&1 && has_tty; then
+        info "Installing whiptail for interactive TUI..."
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq >/dev/null 2>&1 || true
+        apt-get install -y -qq whiptail >/dev/null 2>&1 || true
+    fi
+
     if can_use_tui; then
         USE_TUI=1
+        log "Interactive TUI enabled"
     else
         USE_TUI=0
-        info "TUI unavailable (missing terminal or whiptail). Using text prompts."
+        if has_tty; then
+            info "TUI unavailable (whiptail install failed). Using text prompts."
+        else
+            info "TUI unavailable (no interactive TTY). Using text prompts."
+        fi
     fi
 }
 
@@ -80,7 +96,7 @@ ui_msg() {
     local message="$2"
 
     if [[ ${USE_TUI} -eq 1 ]]; then
-        whiptail --title "${title}" --msgbox "${message}" 14 74
+        whiptail --title "${title}" --msgbox "${message}" 14 74 < /dev/tty > /dev/tty 2>&1
     else
         echo ""
         echo -e "${BOLD}${title}${NC}"
@@ -93,13 +109,13 @@ ui_confirm() {
     local message="$2"
 
     if [[ ${USE_TUI} -eq 1 ]]; then
-        whiptail --title "${title}" --yesno "${message}" 14 74
+        whiptail --title "${title}" --yesno "${message}" 14 74 < /dev/tty > /dev/tty 2>&1
         return $?
     fi
 
     echo ""
     echo -e "${BOLD}${title}${NC}"
-    read -r -p "${message} [y/N]: " reply
+    read -r -p "${message} [y/N]: " reply < /dev/tty
     [[ "${reply}" =~ ^[Yy]$ ]]
 }
 
@@ -108,11 +124,11 @@ ui_input() {
     local default_value="$2"
 
     if [[ ${USE_TUI} -eq 1 ]]; then
-        whiptail --title "AutoTrader" --inputbox "${prompt}" 11 74 "${default_value}" 3>&1 1>&2 2>&3
+        whiptail --title "AutoTrader" --inputbox "${prompt}" 11 74 "${default_value}" 3>&1 1>&2 2>&3 < /dev/tty
         return $?
     fi
 
-    read -r -p "${prompt} [${default_value}]: " value
+    read -r -p "${prompt} [${default_value}]: " value < /dev/tty
     echo "${value:-$default_value}"
 }
 
@@ -131,7 +147,7 @@ select_mode() {
             "backup" "Backup config.env" \
             "config" "Open config.env editor" \
             "quit" "Exit installer" \
-            3>&1 1>&2 2>&3) || INSTALL_MODE="quit"
+            3>&1 1>&2 2>&3 < /dev/tty) || INSTALL_MODE="quit"
 
         INSTALL_MODE="${choice:-quit}"
     else
@@ -146,7 +162,7 @@ select_mode() {
         echo "  7) Backup config.env"
         echo "  8) Edit config.env"
         echo "  9) Quit"
-        read -r -p "Choice [1-9]: " choice
+        read -r -p "Choice [1-9]: " choice < /dev/tty
 
         case "${choice}" in
             1) INSTALL_MODE="full" ;;
