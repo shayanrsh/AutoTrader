@@ -37,22 +37,22 @@ Telegram Channel ──→ Telethon Listener ──→ asyncio.Queue ──→ A
 
 **Two independent systemd services:**
 
-| Service | Process | Restart Policy |
-|---|---|---|
-| `mt5-bridge.service` | Xvfb + Wine MT5 + mt5linux RPC | `Restart=always` (10s) |
-| `autotrader.service` | Main Python trading bot | `Restart=on-failure` (5s) |
+| Service              | Process                        | Restart Policy            |
+| -------------------- | ------------------------------ | ------------------------- |
+| `mt5-bridge.service` | Xvfb + Wine MT5 + mt5linux RPC | `Restart=always` (10s)    |
+| `autotrader.service` | Main Python trading bot        | `Restart=on-failure` (5s) |
 
 ## 🧩 Components
 
-| Module | Description |
-|---|---|
-| `telegram_listener.py` | Telethon-based channel monitor with auto-reconnect and catch-up |
-| `ai_parser.py` | 3-tier parsing: **Gemini Flash** → **Groq LLaMA 3.3** → **Regex** |
-| `risk_manager.py` | Per-trade risk cap, position limits, daily loss halt, deduplication |
-| `mt5_executor.py` | Order placement with requote retry, auto-symbol detection |
-| `notifier.py` | Trade confirmations and error alerts via Telegram Bot API |
-| `database.py` | Async SQLite for signal history, trade log, deduplication |
-| `health.py` | HTTP `/health` and `/metrics` endpoints for monitoring |
+| Module                 | Description                                                         |
+| ---------------------- | ------------------------------------------------------------------- |
+| `telegram_listener.py` | Telethon-based channel monitor with auto-reconnect and catch-up     |
+| `ai_parser.py`         | 3-tier parsing: **Gemini Flash** → **Groq LLaMA 3.3** → **Regex**   |
+| `risk_manager.py`      | Per-trade risk cap, position limits, daily loss halt, deduplication |
+| `mt5_executor.py`      | Order placement with requote retry, auto-symbol detection           |
+| `notifier.py`          | Trade confirmations and error alerts via Telegram Bot API           |
+| `database.py`          | Async SQLite for signal history, trade log, deduplication           |
+| `health.py`            | HTTP `/health` and `/metrics` endpoints for monitoring              |
 
 ## 🛡️ Risk Management
 
@@ -107,13 +107,13 @@ chmod 600 config.env
 
 ### Required API Keys
 
-| Key | Where to get it |
-|---|---|
-| `TELEGRAM_API_ID` / `API_HASH` | [my.telegram.org/apps](https://my.telegram.org/apps) |
-| `NOTIFY_BOT_TOKEN` | [@BotFather on Telegram](https://t.me/BotFather) |
-| `GEMINI_API_KEY` | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) |
-| `GROQ_API_KEY` | [console.groq.com/keys](https://console.groq.com/keys) |
-| `MT5_ACCOUNT` / `MT5_PASSWORD` | Your Alpari MT5 account |
+| Key                            | Where to get it                                                  |
+| ------------------------------ | ---------------------------------------------------------------- |
+| `TELEGRAM_API_ID` / `API_HASH` | [my.telegram.org/apps](https://my.telegram.org/apps)             |
+| `NOTIFY_BOT_TOKEN`             | [@BotFather on Telegram](https://t.me/BotFather)                 |
+| `GEMINI_API_KEY`               | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) |
+| `GROQ_API_KEY`                 | [console.groq.com/keys](https://console.groq.com/keys)           |
+| `MT5_ACCOUNT` / `MT5_PASSWORD` | Your Alpari MT5 account                                          |
 
 ### Key Settings
 
@@ -201,21 +201,21 @@ The installer now opens an interactive TUI menu (`whiptail` when available, clea
 
 ### Core actions
 
-| Action | What it does |
-|---|---|
-| **Full Install** | Everything: system packages, Wine, MT5, Python, firewall, services |
-| **App Only** | Bot code + Python venv (assumes system deps are installed) |
+| Action             | What it does                                                          |
+| ------------------ | --------------------------------------------------------------------- |
+| **Full Install**   | Everything: system packages, Wine, MT5, Python, firewall, services    |
+| **App Only**       | Bot code + Python venv (assumes system deps are installed)            |
 | **Update Project** | Pull latest code, refresh venv dependencies, optional service restart |
 
 ### Extra utility actions
 
-| Action | What it does |
-|---|---|
-| **System Status** | Shows install path, disk/RAM usage, and service states |
-| **Service Manager** | Start/stop/restart services, inspect status, view recent logs |
-| **Health Check** | Queries `http://localhost:8080/health` |
-| **Backup config.env** | Creates timestamped config backups |
-| **Edit config.env** | Opens config file directly from the installer |
+| Action                | What it does                                                  |
+| --------------------- | ------------------------------------------------------------- |
+| **System Status**     | Shows install path, disk/RAM usage, and service states        |
+| **Service Manager**   | Start/stop/restart services, inspect status, view recent logs |
+| **Health Check**      | Queries `http://localhost:8080/health`                        |
+| **Backup config.env** | Creates timestamped config backups                            |
+| **Edit config.env**   | Opens config file directly from the installer                 |
 
 ```bash
 # Full install (default)
