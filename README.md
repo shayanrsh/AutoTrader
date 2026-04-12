@@ -29,6 +29,7 @@ The installer now includes:
 - Guided hints on where each credential is obtained
 - Modern Textual dashboard UI (with shell fallback when unavailable)
 - Modern Textual installer UI for setup/update/uninstall workflows
+- Textual-first bootstrap even from `curl | bash` (auto-falls back only if Textual runtime cannot be prepared)
 - Better failure reporting and safer preflight behavior
 - Rerun-safe virtual environment setup (second install/update runs no longer fail on existing `venv`)
 - Runtime dashboard command installation (`atdash`, alias `atd`)
