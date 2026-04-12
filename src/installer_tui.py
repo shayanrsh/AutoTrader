@@ -27,7 +27,7 @@ FIELDS = [
     ("NOTIFY_BOT_TOKEN", "", True),
     ("NOTIFY_CHAT_ID", "123456789", False),
     ("GEMINI_API_KEY", "", True),
-    ("GROQ_API_KEY", "", True),
+    ("XAI_API_KEY", "", True),
     ("MT5_ACCOUNT", "12345678", False),
     ("MT5_PASSWORD", "", True),
     ("MT5_SERVER", "Alpari-MT5", False),

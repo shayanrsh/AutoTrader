@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -50,16 +50,112 @@ class Settings(BaseSettings):
     notify_chat_id: int = Field(..., description="Your personal chat ID for alerts")
 
     # ── AI Parser: Gemini ──────────────────────────────────────────────
-    gemini_api_key: str = Field(..., description="Google Gemini API key")
-    gemini_model: str = Field(
-        "gemini-2.0-flash", description="Gemini model name"
+    ollama_enabled: bool = Field(
+        True,
+        description="Enable Ollama as primary parser before cloud fallbacks",
+    )
+    ollama_base_url: str = Field(
+        "http://127.0.0.1:11434",
+        description="Ollama server base URL",
+    )
+    ollama_model: str = Field(
+        "gemma3:1b-q4_K_M",
+        description="Primary local Ollama model name",
+    )
+    ollama_model_rate_limits: str = Field(
+        "gemma3:1b-q4_K_M=10/5000",
+        description="Ollama local limits map: model=RPM/RPD,model=RPM/RPD",
     )
 
-    # ── AI Parser: Groq ───────────────────────────────────────────────
-    groq_api_key: str = Field(..., description="Groq API key")
-    groq_model: str = Field(
-        "llama-3.3-70b-versatile", description="Groq model name"
+    # ── AI Parser: Gemini ──────────────────────────────────────────────
+    gemini_api_key: str = Field(..., description="Google Gemini API key")
+    gemini_model: str = Field(
+        "gemma-3-4b-it", description="Google model name for parser"
     )
+    gemini_model_rate_limits: str = Field(
+        "gemma-3-4b-it=10/1000,gemini-2.5-flash=5/20",
+        description="Gemini local limits map: model=RPM/RPD,model=RPM/RPD",
+    )
+
+    # ── AI Parser: xAI Grok ───────────────────────────────────────────
+    xai_api_key: str = Field(
+        ...,
+        validation_alias=AliasChoices("XAI_API_KEY", "GROQ_API_KEY"),
+        description="xAI API key (XAI_API_KEY preferred; GROQ_API_KEY supported for compatibility)",
+    )
+    xai_model: str = Field(
+        "grok-3-mini",
+        validation_alias=AliasChoices("XAI_MODEL", "GROQ_MODEL"),
+        description="xAI Grok model name",
+    )
+    xai_model_rate_limits: str = Field(
+        "grok-3-mini=0/0",
+        description=(
+            "xAI local limits map: model=RPM/RPD,model=RPM/RPD "
+            "(0/0 disables local throttling for that model)"
+        ),
+    )
+
+    @property
+    def groq_api_key(self) -> str:
+        """Backward-compatible alias used by existing call sites."""
+        return self.xai_api_key
+
+    @property
+    def groq_model(self) -> str:
+        """Backward-compatible alias used by existing call sites."""
+        return self.xai_model
+
+    @field_validator("xai_model")
+    @classmethod
+    def normalize_xai_model(cls, v: str) -> str:
+        """Map old Groq model names to a valid xAI Grok model."""
+        value = str(v).strip()
+        if not value:
+            return "grok-3-mini"
+
+        legacy_groq_models = {
+            "llama-3.3-70b-versatile",
+            "llama-3.1-70b-versatile",
+            "llama-3.1-8b-instant",
+            "mixtral-8x7b-32768",
+            "gemma2-9b-it",
+        }
+        if value in legacy_groq_models:
+            return "grok-3-mini"
+        return value
+
+    @staticmethod
+    def _parse_model_rate_limits(raw: str) -> dict[str, tuple[int, int]]:
+        """Parse `model=RPM/RPD,model=RPM/RPD` into a dictionary."""
+        result: dict[str, tuple[int, int]] = {}
+        for chunk in str(raw).split(","):
+            item = chunk.strip()
+            if not item or "=" not in item:
+                continue
+
+            model_name, limits = item.split("=", 1)
+            model_name = model_name.strip()
+            if not model_name or "/" not in limits:
+                continue
+
+            rpm_str, rpd_str = limits.split("/", 1)
+            try:
+                rpm = max(0, int(rpm_str.strip()))
+                rpd = max(0, int(rpd_str.strip()))
+            except ValueError:
+                continue
+            result[model_name] = (rpm, rpd)
+        return result
+
+    def gemini_rate_limits_map(self) -> dict[str, tuple[int, int]]:
+        return self._parse_model_rate_limits(self.gemini_model_rate_limits)
+
+    def ollama_rate_limits_map(self) -> dict[str, tuple[int, int]]:
+        return self._parse_model_rate_limits(self.ollama_model_rate_limits)
+
+    def xai_rate_limits_map(self) -> dict[str, tuple[int, int]]:
+        return self._parse_model_rate_limits(self.xai_model_rate_limits)
 
     # ── MT5 Connection ────────────────────────────────────────────────
     mt5_host: str = Field("localhost", description="mt5linux bridge host")
@@ -143,18 +239,27 @@ class Settings(BaseSettings):
         if not value:
             raise ValueError("telegram_channel_id cannot be empty")
 
-        if value.startswith("@"):
-            value = value[1:]
+        tokens = [part.strip() for part in value.split(",") if part.strip()]
+        if not tokens:
+            raise ValueError("telegram_channel_id cannot be empty")
 
-        if value.lstrip("-").isdigit():
-            return value
+        normalized: list[str] = []
+        for token in tokens:
+            if token.startswith("@"):
+                token = token[1:]
 
-        if not value.replace("_", "").isalnum():
-            raise ValueError(
-                "telegram_channel_id must be a numeric id (e.g. -100123...) "
-                "or a valid username"
-            )
-        return value
+            if token.lstrip("-").isdigit():
+                normalized.append(token)
+                continue
+
+            if not token.replace("_", "").isalnum():
+                raise ValueError(
+                    "telegram_channel_id tokens must be numeric ids (e.g. -100123...) "
+                    "or valid usernames, separated by commas"
+                )
+            normalized.append(token)
+
+        return ",".join(normalized)
 
 
 # ── Singleton access ─────────────────────────────────────────────────────

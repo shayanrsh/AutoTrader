@@ -8,7 +8,7 @@
     <img src="https://img.shields.io/badge/python-3.11+-blue?logo=python&logoColor=white" alt="Python">
     <img src="https://img.shields.io/badge/platform-Ubuntu_24.04-orange?logo=ubuntu&logoColor=white" alt="Ubuntu">
     <img src="https://img.shields.io/badge/MT5-Alpari-green" alt="MetaTrader 5">
-    <img src="https://img.shields.io/badge/AI-Gemini_+_Groq-purple" alt="AI">
+    <img src="https://img.shields.io/badge/AI-Gemini_+_Grok-purple" alt="AI">
     <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="License">
   </p>
 </p>
@@ -25,7 +25,7 @@ curl -fsSL https://raw.githubusercontent.com/shayanrsh/AutoTrader/main/install.s
 
 The installer now includes:
 
-- Interactive setup wizard for all required credentials (`TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `GEMINI_API_KEY`, `GROQ_API_KEY`, `MT5_ACCOUNT`, etc.)
+- Interactive setup wizard for all required credentials (`TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `GEMINI_API_KEY`, `XAI_API_KEY`, `MT5_ACCOUNT`, etc.)
 - Guided hints on where each credential is obtained
 - Modern Textual dashboard UI (with shell fallback when unavailable)
 - Modern Textual installer UI for setup/update/uninstall workflows
@@ -40,7 +40,7 @@ The installer now includes:
 Telegram Channel ──→ Telethon Listener ──→ asyncio.Queue ──→ AI Signal Parser ──→ Risk Manager ──→ MT5 Executor ──→ Alpari Broker
                                                                     │                                       │
                                                               Gemini Flash                            SQLite DB
-                                                              Groq (failover)                      Telegram Notifier
+                                                              xAI Grok (failover)                  Telegram Notifier
                                                               Regex (fallback)                     Health Check API
 ```
 
@@ -49,7 +49,8 @@ Telegram Channel ──→ Telethon Listener ──→ asyncio.Queue ──→ A
 | Module                            | Description                                                         |
 | --------------------------------- | ------------------------------------------------------------------- |
 | `src/telegram_listener.py`        | Telethon-based channel monitor with reconnect and catch-up          |
-| `src/ai_parser.py`                | 3-tier parsing: Gemini → Groq → Regex fallback                      |
+| `src/telegram_setup.py`           | First-login helper: creates session, lists channels, updates config |
+| `src/ai_parser.py`                | 4-tier parsing: Ollama → Gemini → xAI Grok → Regex fallback         |
 | `src/risk_manager.py`             | Per-trade risk cap, position limits, daily loss halt, deduplication |
 | `src/mt5_executor.py`             | MT5 trade execution with retry and symbol auto-detection            |
 | `src/notifier.py`                 | Telegram notifications for alerts/trades/errors                     |
@@ -72,7 +73,7 @@ Telegram Channel ──→ Telethon Listener ──→ asyncio.Queue ──→ A
 
 - Telegram listener: `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_PHONE`, `TELEGRAM_CHANNEL_ID`
 - Notify bot: `NOTIFY_BOT_TOKEN`, `NOTIFY_CHAT_ID`
-- AI keys: `GEMINI_API_KEY`, `GROQ_API_KEY`
+- AI keys: `GEMINI_API_KEY`, `XAI_API_KEY` (legacy `GROQ_API_KEY` still supported)
 - MT5 credentials: `MT5_ACCOUNT`, `MT5_PASSWORD`, `MT5_SERVER`
 - Runtime safety: `DRY_RUN`
 
@@ -118,8 +119,11 @@ Installer command names:
 # 1) Install
 curl -fsSL https://raw.githubusercontent.com/shayanrsh/AutoTrader/main/install.sh | sudo bash
 
-# 2) First Telegram authentication (one-time interactive)
-sudo -u trader bash -c 'cd /home/trader/autotrader && source venv/bin/activate && python -m src.main'
+# 2) First Telegram authentication + channel discovery (one-time interactive)
+sudo -u trader bash -c 'cd /home/trader/autotrader && source venv/bin/activate && python -m src.telegram_setup'
+
+# Optional: later channel search without repeating full login flow
+sudo -u trader bash -c 'cd /home/trader/autotrader && source venv/bin/activate && python -m src.telegram_setup --mode search'
 
 # 3) Start services
 sudo systemctl start mt5-bridge
@@ -127,7 +131,34 @@ sudo systemctl start autotrader
 
 # 4) Open dashboard
 atdash
+
+# 5) Open database TUI dashboard (non-Textual)
+python -m src.db_dashboard
+
+# 6) (Optional but recommended) Install local LLM primary parser (Ollama + Gemma 3)
+sudo bash scripts/install-local-llm-ollama.sh
 ```
+
+## 🧠 Local LLM (Ollama)
+
+AutoTrader can use a local Ollama model as the primary signal parser:
+
+- Primary local model: `gemma3:1b-q4_K_M`
+- Fallback chain: `Gemini` → `xAI Grok` → `Regex`
+
+One-command setup:
+
+```bash
+sudo bash scripts/install-local-llm-ollama.sh
+```
+
+What the script does:
+
+- installs Ollama
+- enables and starts `ollama` systemd service
+- pulls `gemma3:1b`
+- creates local alias `gemma3:1b-q4_K_M`
+- updates `config.env` with Ollama primary settings
 
 ## 📦 Project Structure
 
@@ -138,6 +169,7 @@ AutoTrader/
 ├── requirements.txt
 ├── setup_server.sh
 ├── scripts/
+│   ├── install-local-llm-ollama.sh
 │   └── autotrader-dashboard.sh
 ├── src/
 │   ├── main.py

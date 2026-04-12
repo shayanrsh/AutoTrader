@@ -142,13 +142,13 @@ sudo -u trader bash -c '
 4. Select or create a project
 5. Copy the API key (starts with `AIzaSy-`)
 
-### Groq API Key
+### xAI API Key
 
-1. Go to https://console.groq.com/keys
+1. Go to https://console.x.ai/
 2. Sign up / log in
 3. Click **"Create API Key"**
 4. Name it `autotrader`
-5. Copy the key (starts with `gsk_`)
+5. Copy the key (starts with `xai-`)
 
 ### Find Your Telegram Channel ID
 
@@ -184,8 +184,11 @@ NOTIFY_BOT_TOKEN=7000000000:AAF-xxxxxxxxxxxxxxxxxxxxxxxxxxxx
 NOTIFY_CHAT_ID=123456789
 
 # AI parsers
+OLLAMA_ENABLED=true
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_MODEL=gemma3:1b-q4_K_M
 GEMINI_API_KEY=AIzaSy-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+XAI_API_KEY=xai_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 # MT5
 MT5_ACCOUNT=12345678
@@ -195,6 +198,15 @@ MT5_SERVER=Alpari-MT5
 # Start in dry-run mode!
 DRY_RUN=true
 ```
+
+### Install Local LLM (Ollama + Gemma 3)
+
+```bash
+cd /home/trader/autotrader
+sudo bash scripts/install-local-llm-ollama.sh
+```
+
+This sets up local Ollama and pulls `gemma3:1b`, then aliases it to `gemma3:1b-q4_K_M` used by the parser configuration.
 
 ---
 
@@ -438,9 +450,12 @@ sudo -u trader bash -c 'cd /home/trader/autotrader && source venv/bin/activate &
 # Test Gemini API key
 curl -s "https://generativelanguage.googleapis.com/v1beta/models?key=YOUR_KEY" | head
 
-# Test Groq API key
-curl -s -H "Authorization: Bearer YOUR_GROQ_KEY" \
-    https://api.groq.com/openai/v1/models | head
+# Test local Ollama
+curl -s http://127.0.0.1:11434/api/tags | head
+
+# Test xAI API key
+curl -s -H "Authorization: Bearer YOUR_XAI_KEY" \
+    https://api.x.ai/v1/models | head
 ```
 
 ### ModuleNotFoundError
@@ -451,7 +466,7 @@ sudo -u trader bash -c '
     cd /home/trader/autotrader
     source venv/bin/activate
     pip install -r requirements.txt
-    python -c "import telethon; import groq; import google.generativeai; print(\"All imports OK\")"
+    python -c "import telethon; import httpx; from google import genai; print(\"All imports OK\")"
 '
 ```
 

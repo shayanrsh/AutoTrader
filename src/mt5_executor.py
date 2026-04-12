@@ -283,7 +283,7 @@ class MT5Executor:
                 action=signal.action,
                 volume=lot_size,
                 stop_loss=signal.stop_loss,
-                take_profit=signal.take_profits[0],
+                take_profit=signal.take_profits,
                 error_message="MT5 not connected",
                 signal_hash=signal.dedup_hash(),
             )
@@ -307,8 +307,7 @@ class MT5Executor:
             )
             price = tick.bid if tick else signal.entry_price
 
-        # Use first TP level
-        take_profit = signal.take_profits[0]
+        take_profit = signal.take_profits
 
         # Build order request
         request = {

@@ -22,7 +22,8 @@ from typing import Optional
 _SENSITIVE_PATTERNS = [
     re.compile(r"(api[_-]?key|api[_-]?hash|password|token|secret)\s*[=:]\s*\S+", re.I),
     re.compile(r"AIzaSy[\w-]{33}"),             # Google API key
-    re.compile(r"gsk_[a-zA-Z0-9]{52,}"),         # Groq API key
+    re.compile(r"gsk_[a-zA-Z0-9]{52,}"),         # Legacy Groq API key
+    re.compile(r"xai-[a-zA-Z0-9_-]{20,}"),       # xAI API key
     re.compile(r"\d{7,}:[A-Za-z0-9_-]{35,}"),    # Telegram bot token
 ]
 

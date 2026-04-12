@@ -6,42 +6,41 @@
 # ============================================================================
 
 # Telegram client (user account API for listening to channels)
-Telethon==1.37.0
+Telethon
 
 # MT5 bridge for Linux (communicates with MT5 running in Wine)
-mt5linux==0.1.9
+mt5linux
 
 # Google Gemini AI SDK (primary signal parser)
-google-generativeai==0.8.5
+google-genai
 
-# Groq AI SDK (failover signal parser)
-groq==0.15.0
+# xAI Grok failover parser uses HTTP API via httpx (no provider SDK required)
 
 # Configuration loading from .env files
-python-dotenv==1.0.1
+python-dotenv
 
 # Data validation and serialization
-pydantic==2.10.5
-pydantic-settings==2.7.1
+pydantic
+pydantic-settings
 
 # Async HTTP server (health check endpoint)
-aiohttp==3.11.11
+aiohttp
 
 # Async SQLite (signal history, trade log, deduplication)
-aiosqlite==0.20.0
+aiosqlite
 
 # Telegram Bot API (notification alerts to admin)
-python-telegram-bot==21.10
+python-telegram-bot
 
 # HTTP client for Groq API calls
-httpx==0.28.1
+httpx
 
 # Modern terminal UI framework for dashboard and controls
-textual==0.76.0
+textual
 
 # Cryptographic hashing (stdlib, listed for clarity)
 # hashlib — built-in, no install needed
 
 # Testing
-pytest==8.3.4
-pytest-asyncio==0.24.0
+pytest
+pytest-asyncio

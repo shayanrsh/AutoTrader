@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 
 class TradeAction(str, Enum):
@@ -30,9 +30,7 @@ class ParsedSignal(BaseModel):
     action: TradeAction = Field(..., description="BUY or SELL")
     entry_price: float = Field(..., gt=0, description="Entry price level")
     stop_loss: float = Field(..., gt=0, description="Stop-loss price level")
-    take_profits: list[float] = Field(
-        ..., min_length=1, description="Take-profit levels (TP1, TP2, ...)"
-    )
+    take_profits: float = Field(..., gt=0, description="Primary take-profit level (TP1)")
     lot_size: Optional[float] = Field(
         None, gt=0, description="Explicit lot size from signal (if provided)"
     )
@@ -46,16 +44,8 @@ class ParsedSignal(BaseModel):
         description="When the signal was received",
     )
     parser_source: str = Field(
-        "unknown", description="Which parser produced this: gemini, groq, regex"
+        "unknown", description="Which parser produced this: gemini, grok, regex"
     )
-
-    @field_validator("take_profits")
-    @classmethod
-    def validate_take_profits(cls, v: list[float]) -> list[float]:
-        for tp in v:
-            if tp <= 0:
-                raise ValueError(f"Take-profit must be positive, got {tp}")
-        return sorted(v)  # Always sort ascending
 
     @model_validator(mode="after")
     def validate_sl_tp_direction(self) -> "ParsedSignal":
@@ -66,9 +56,9 @@ class ParsedSignal(BaseModel):
                     f"BUY signal: SL ({self.stop_loss}) must be below "
                     f"entry ({self.entry_price})"
                 )
-            if self.take_profits[0] <= self.entry_price:
+            if self.take_profits <= self.entry_price:
                 raise ValueError(
-                    f"BUY signal: TP1 ({self.take_profits[0]}) must be above "
+                    f"BUY signal: TP1 ({self.take_profits}) must be above "
                     f"entry ({self.entry_price})"
                 )
         elif self.action == TradeAction.SELL:
@@ -77,9 +67,9 @@ class ParsedSignal(BaseModel):
                     f"SELL signal: SL ({self.stop_loss}) must be above "
                     f"entry ({self.entry_price})"
                 )
-            if self.take_profits[0] >= self.entry_price:
+            if self.take_profits >= self.entry_price:
                 raise ValueError(
-                    f"SELL signal: TP1 ({self.take_profits[0]}) must be below "
+                    f"SELL signal: TP1 ({self.take_profits}) must be below "
                     f"entry ({self.entry_price})"
                 )
         return self
@@ -93,7 +83,7 @@ class ParsedSignal(BaseModel):
             f"{self.action.value}|"
             f"{self.entry_price:.2f}|"
             f"{self.stop_loss:.2f}|"
-            f"{self.take_profits[0]:.2f}"
+            f"{self.take_profits:.2f}"
         )
         return hashlib.sha256(key.encode()).hexdigest()[:16]
 

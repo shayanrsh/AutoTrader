@@ -8,13 +8,23 @@ Lightweight aiohttp server providing:
 
 from __future__ import annotations
 
+import os
+import sys
 import time
 from typing import Optional
 
 from aiohttp import web
 
-from src.models import HealthStatus
-from src.utils import get_logger
+try:
+    from src.models import HealthStatus
+    from src.utils import get_logger
+except ModuleNotFoundError:
+    # Supports direct execution from src/ (python3 health.py).
+    _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _PROJECT_ROOT not in sys.path:
+        sys.path.insert(0, _PROJECT_ROOT)
+    from src.models import HealthStatus
+    from src.utils import get_logger
 
 logger = get_logger("health")
 

@@ -77,10 +77,16 @@ class AutoTrader:
         )
 
         self._parser = AISignalParser(
+            ollama_enabled=settings.ollama_enabled,
+            ollama_base_url=settings.ollama_base_url,
+            ollama_model=settings.ollama_model,
             gemini_api_key=settings.gemini_api_key,
             gemini_model=settings.gemini_model,
-            groq_api_key=settings.groq_api_key,
-            groq_model=settings.groq_model,
+            xai_api_key=settings.xai_api_key,
+            xai_model=settings.xai_model,
+            ollama_rate_limits=settings.ollama_rate_limits_map(),
+            gemini_rate_limits=settings.gemini_rate_limits_map(),
+            xai_rate_limits=settings.xai_rate_limits_map(),
         )
 
         self._risk_manager = RiskManager(
@@ -214,167 +220,232 @@ class AutoTrader:
 
     async def _process_signal(self, payload: dict) -> None:
         """Process a single signal through the full pipeline."""
+        event_type = str(payload.get("event_type", "new"))
         raw_text = payload.get("text", "")
         message_id = payload.get("message_id")
+        channel_id = payload.get("channel_id")
+        text_before = payload.get("text_before")
+        text_after = payload.get("text_after", raw_text)
         msg_timestamp = payload.get("timestamp", utc_now())
+        event_row_id: Optional[int] = None
 
-        logger.info("Processing message id=%s (%d chars)", message_id, len(raw_text))
-
-        # ── Step 1: Parse ───────────────────────────────────────────
-        signal = await self._parser.parse(raw_text, message_id)
-
-        if signal is None:
-            logger.debug("Message id=%s is not a trading signal — skipping", message_id)
-            # Still record it for audit
-            record = SignalRecord(
-                dedup_hash="non_signal",
-                raw_text=raw_text[:500],
-                parser_source="none",
-                trade_status="SKIPPED",
-                message_id=message_id,
+        if message_id is not None:
+            event_row_id = await self._db.insert_telegram_message_event(
+                message_id=int(message_id),
+                event_type=event_type,
+                channel_id=str(channel_id) if channel_id is not None else None,
+                text_before=(str(text_before)[:2000] if text_before else None),
+                text_after=(str(text_after)[:2000] if text_after else None),
+                created_at=msg_timestamp,
             )
-            await self._db.insert_signal(record)
-            return
-
-        # Override timestamp from the actual message
-        signal.timestamp = msg_timestamp
-
-        self._health.signals_processed += 1
-        self._health.last_signal_time = format_timestamp(utc_now())
-
-        # Update parser stats
-        self._health.parser_stats = self._parser.get_stats()
 
         logger.info(
-            "Signal parsed: %s @ %s, SL=%s, TP=%s (by %s, confidence=%.0f%%)",
-            signal.action.value,
-            format_price(signal.entry_price),
-            format_price(signal.stop_loss),
-            [format_price(tp) for tp in signal.take_profits],
-            signal.parser_source,
-            signal.confidence * 100,
+            "Processing telegram event type=%s id=%s (%d chars)",
+            event_type,
+            message_id,
+            len(raw_text),
         )
 
-        # ── Step 2: Risk Check ──────────────────────────────────────
-        account_balance = 0.0
-        daily_pnl = 0.0
-        existing_positions: list[dict] = []
+        # Deleted events and empty-text events are recorded above for dashboard/audit,
+        # but should not pass through parser/trading pipeline.
+        if event_type == "delete" or not raw_text:
+            if event_row_id is not None:
+                await self._db.mark_telegram_event_parse_status(
+                    event_row_id,
+                    "SKIPPED",
+                    parser_source="none",
+                    parse_error="non-tradeable event",
+                )
+            logger.debug("Skipping non-tradeable event: type=%s id=%s", event_type, message_id)
+            return
 
-        if self._executor.is_connected:
-            acct = await self._executor.get_account_info()
-            if acct:
-                account_balance = acct.get("balance", 0.0)
-            daily_pnl = await self._executor.get_daily_pnl()
-            existing_positions = await self._executor.get_open_positions()
-        elif self._settings.dry_run:
-            # Use a simulated balance for dry-run risk calculations
-            account_balance = 10000.0
+        if event_row_id is not None:
+            existing_status = await self._db.get_telegram_event_parse_status(event_row_id)
+            if existing_status in {"PROCESSED", "SKIPPED"}:
+                logger.info(
+                    "Skipping already parsed telegram event row id=%s status=%s",
+                    event_row_id,
+                    existing_status,
+                )
+                return
+            await self._db.mark_telegram_event_parse_status(event_row_id, "PROCESSING")
 
-        current_open = len(existing_positions)
-        self._health.open_trades = current_open
-        self._health.daily_pnl = daily_pnl
+        try:
+            # ── Step 1: Parse ───────────────────────────────────────────
+            signal = await self._parser.parse(raw_text, message_id)
 
-        risk_result = await self._risk_manager.check_trade(
-            signal=signal,
-            account_balance=account_balance,
-            current_open_count=current_open,
-            daily_pnl=daily_pnl,
-            existing_positions=existing_positions,
-        )
+            if signal is None:
+                logger.debug("Message id=%s is not a trading signal — skipping", message_id)
+                if event_row_id is not None:
+                    await self._db.mark_telegram_event_parse_status(
+                        event_row_id,
+                        "PROCESSED",
+                        parser_source="none",
+                        parse_error="non-signal or parse failed",
+                    )
+                return
 
-        if not risk_result.approved:
-            logger.warning("Signal REJECTED by risk manager: %s", risk_result.reason)
-            # Record the rejected signal
-            record = SignalRecord(
+            # Override timestamp from the actual message
+            signal.timestamp = msg_timestamp
+
+            self._health.signals_processed += 1
+            self._health.last_signal_time = format_timestamp(utc_now())
+
+            # Update parser stats
+            self._health.parser_stats = self._parser.get_stats()
+
+            logger.info(
+                "Signal parsed: %s @ %s, SL=%s, TP=%s (by %s, confidence=%.0f%%)",
+                signal.action.value,
+                format_price(signal.entry_price),
+                format_price(signal.stop_loss),
+                format_price(signal.take_profits),
+                signal.parser_source,
+                signal.confidence * 100,
+            )
+
+            # ── Step 2: Risk Check ──────────────────────────────────────
+            account_balance = 0.0
+            daily_pnl = 0.0
+            existing_positions: list[dict] = []
+
+            if self._executor.is_connected:
+                acct = await self._executor.get_account_info()
+                if acct:
+                    account_balance = acct.get("balance", 0.0)
+                daily_pnl = await self._executor.get_daily_pnl()
+                existing_positions = await self._executor.get_open_positions()
+            elif self._settings.dry_run:
+                # Use a simulated balance for dry-run risk calculations
+                account_balance = 10000.0
+
+            current_open = len(existing_positions)
+            self._health.open_trades = current_open
+            self._health.daily_pnl = daily_pnl
+
+            risk_result = await self._risk_manager.check_trade(
+                signal=signal,
+                account_balance=account_balance,
+                current_open_count=current_open,
+                daily_pnl=daily_pnl,
+                existing_positions=existing_positions,
+            )
+
+            if not risk_result.approved:
+                logger.warning("Signal REJECTED by risk manager: %s", risk_result.reason)
+                # Record the rejected signal
+                record = SignalRecord(
+                    dedup_hash=signal.dedup_hash(),
+                    raw_text=raw_text[:500],
+                    parsed_action=signal.action.value,
+                    parsed_entry=signal.entry_price,
+                    parsed_sl=signal.stop_loss,
+                    parsed_tp1=signal.take_profits,
+                    parser_source=signal.parser_source,
+                    trade_status="REJECTED",
+                    message_id=message_id,
+                )
+                await self._db.insert_signal(record)
+                if event_row_id is not None:
+                    await self._db.mark_telegram_event_parse_status(
+                        event_row_id,
+                        "PROCESSED",
+                        parser_source=signal.parser_source,
+                    )
+                await self._notifier.send_risk_rejection(signal, risk_result)
+                return
+
+            lot_size = risk_result.adjusted_lot_size
+            logger.info(
+                "Risk check PASSED: lot=%s, risk=$%.2f (%s)",
+                format_lot(lot_size),
+                risk_result.risk_amount,
+                f"{risk_result.risk_pct:.2f}%",
+            )
+
+            # ── Step 3: Execute ─────────────────────────────────────────
+            if self._settings.dry_run:
+                # Dry-run: log intent but don't trade
+                trade_result = TradeResult(
+                    status=TradeStatus.DRY_RUN,
+                    symbol=self._executor.resolved_symbol,
+                    action=signal.action,
+                    volume=lot_size,
+                    price=signal.entry_price,
+                    stop_loss=signal.stop_loss,
+                    take_profit=signal.take_profits,
+                    signal_hash=signal.dedup_hash(),
+                )
+                logger.info(
+                    "DRY RUN: Would place %s %s %s lots @ %s, SL=%s, TP=%s",
+                    signal.action.value,
+                    self._executor.resolved_symbol,
+                    format_lot(lot_size),
+                    format_price(signal.entry_price),
+                    format_price(signal.stop_loss),
+                    format_price(signal.take_profits),
+                )
+            else:
+                # Live execution
+                trade_result = await self._executor.place_order(signal, lot_size)
+
+            self._health.trades_executed += 1
+
+            # ── Step 4: Record & Notify ─────────────────────────────────
+            # Save signal record
+            signal_record = SignalRecord(
                 dedup_hash=signal.dedup_hash(),
                 raw_text=raw_text[:500],
                 parsed_action=signal.action.value,
                 parsed_entry=signal.entry_price,
                 parsed_sl=signal.stop_loss,
-                parsed_tp1=signal.take_profits[0],
+                parsed_tp1=signal.take_profits,
                 parser_source=signal.parser_source,
-                trade_status="REJECTED",
+                trade_ticket=trade_result.order_ticket,
+                trade_status=trade_result.status.value,
                 message_id=message_id,
             )
-            await self._db.insert_signal(record)
-            await self._notifier.send_risk_rejection(signal, risk_result)
-            return
+            await self._db.insert_signal(signal_record)
 
-        lot_size = risk_result.adjusted_lot_size
-        logger.info(
-            "Risk check PASSED: lot=%s, risk=$%.2f (%s)",
-            format_lot(lot_size),
-            risk_result.risk_amount,
-            f"{risk_result.risk_pct:.2f}%",
-        )
+            # Save trade record
+            await self._db.insert_trade(trade_result)
 
-        # ── Step 3: Execute ─────────────────────────────────────────
-        if self._settings.dry_run:
-            # Dry-run: log intent but don't trade
-            trade_result = TradeResult(
-                status=TradeStatus.DRY_RUN,
-                symbol=self._executor.resolved_symbol,
-                action=signal.action,
-                volume=lot_size,
-                price=signal.entry_price,
-                stop_loss=signal.stop_loss,
-                take_profit=signal.take_profits[0],
-                signal_hash=signal.dedup_hash(),
-            )
-            logger.info(
-                "DRY RUN: Would place %s %s %s lots @ %s, SL=%s, TP=%s",
-                signal.action.value,
-                self._executor.resolved_symbol,
-                format_lot(lot_size),
-                format_price(signal.entry_price),
-                format_price(signal.stop_loss),
-                format_price(signal.take_profits[0]),
-            )
-        else:
-            # Live execution
-            trade_result = await self._executor.place_order(signal, lot_size)
+            # Send notification
+            await self._notifier.send_trade_alert(signal, trade_result, risk_result)
 
-        self._health.trades_executed += 1
+            if event_row_id is not None:
+                await self._db.mark_telegram_event_parse_status(
+                    event_row_id,
+                    "PROCESSED",
+                    parser_source=signal.parser_source,
+                )
 
-        # ── Step 4: Record & Notify ─────────────────────────────────
-        # Save signal record
-        signal_record = SignalRecord(
-            dedup_hash=signal.dedup_hash(),
-            raw_text=raw_text[:500],
-            parsed_action=signal.action.value,
-            parsed_entry=signal.entry_price,
-            parsed_sl=signal.stop_loss,
-            parsed_tp1=signal.take_profits[0],
-            parser_source=signal.parser_source,
-            trade_ticket=trade_result.order_ticket,
-            trade_status=trade_result.status.value,
-            message_id=message_id,
-        )
-        await self._db.insert_signal(signal_record)
-
-        # Save trade record
-        await self._db.insert_trade(trade_result)
-
-        # Send notification
-        await self._notifier.send_trade_alert(signal, trade_result, risk_result)
-
-        if trade_result.status == TradeStatus.SUCCESS:
-            logger.info(
-                "✅ Trade executed: ticket=%s, %s %s lots @ %s",
-                trade_result.order_ticket,
-                signal.action.value,
-                format_lot(trade_result.volume),
-                format_price(trade_result.price or 0),
-            )
-        elif trade_result.status == TradeStatus.DRY_RUN:
-            logger.info("🔵 Dry-run trade logged successfully")
-        else:
-            logger.warning(
-                "❌ Trade failed: %s — %s",
-                trade_result.status.value,
-                trade_result.error_message,
-            )
-            self._health.errors_count += 1
+            if trade_result.status == TradeStatus.SUCCESS:
+                logger.info(
+                    "✅ Trade executed: ticket=%s, %s %s lots @ %s",
+                    trade_result.order_ticket,
+                    signal.action.value,
+                    format_lot(trade_result.volume),
+                    format_price(trade_result.price or 0),
+                )
+            elif trade_result.status == TradeStatus.DRY_RUN:
+                logger.info("🔵 Dry-run trade logged successfully")
+            else:
+                logger.warning(
+                    "❌ Trade failed: %s — %s",
+                    trade_result.status.value,
+                    trade_result.error_message,
+                )
+                self._health.errors_count += 1
+        except Exception as e:
+            if event_row_id is not None:
+                await self._db.mark_telegram_event_parse_status(
+                    event_row_id,
+                    "FAILED",
+                    parser_source="none",
+                    parse_error=str(e)[:400],
+                )
+            raise
 
     async def _periodic_tasks(self) -> None:
         """
@@ -386,10 +457,12 @@ class AutoTrader:
         logger.info("Periodic tasks started")
         mt5_check_interval = 60    # seconds
         pnl_record_interval = 300  # 5 minutes
+        non_signal_cleanup_interval = 3600  # 1 hour
         cleanup_interval = 86400   # 24 hours
 
         last_mt5_check = 0.0
         last_pnl_record = 0.0
+        last_non_signal_cleanup = 0.0
         last_cleanup = 0.0
 
         while not self._shutdown_event.is_set():
@@ -425,6 +498,11 @@ class AutoTrader:
                                 starting_balance=acct.get("balance", 0),
                                 ending_balance=acct.get("equity", 0),
                             )
+
+                # Remove non-signal channel messages older than 24h
+                if now - last_non_signal_cleanup >= non_signal_cleanup_interval:
+                    last_non_signal_cleanup = now
+                    await self._db.cleanup_non_signal_telegram_messages(max_age_hours=24)
 
                 # Database cleanup
                 if now - last_cleanup >= cleanup_interval:

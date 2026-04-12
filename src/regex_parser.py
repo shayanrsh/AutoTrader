@@ -2,7 +2,7 @@
 AutoTrader — Regex Fallback Signal Parser
 
 Pattern-matching parser for common trading signal formats.
-Used when both AI APIs (Gemini and Groq) are unavailable.
+Used when both AI APIs (Gemini and xAI Grok) are unavailable.
 
 Handles these common signal patterns:
   - "BUY XAUUSD @ 2345.50"
@@ -168,7 +168,7 @@ class RegexParser:
                 action=action,
                 entry_price=entry,
                 stop_loss=sl,
-                take_profits=tps,
+                take_profits=tps[0],
                 lot_size=lot_size,
                 confidence=0.6,  # Lower confidence than AI parsers
                 raw_text=raw_text,
