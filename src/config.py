@@ -37,8 +37,8 @@ class Settings(BaseSettings):
     telegram_api_id: int = Field(..., description="Telegram API ID from my.telegram.org")
     telegram_api_hash: str = Field(..., description="Telegram API hash from my.telegram.org")
     telegram_phone: str = Field(..., description="Phone number in international format")
-    telegram_channel_id: int = Field(
-        ..., description="Numeric channel ID (negative) or username"
+    telegram_channel_id: str = Field(
+        ..., description="Numeric channel ID (negative) or channel username"
     )
     telegram_session_path: str = Field(
         "data/autotrader.session",
@@ -135,6 +135,26 @@ class Settings(BaseSettings):
                 "Get yours from https://my.telegram.org/apps"
             )
         return v
+
+    @field_validator("telegram_channel_id")
+    @classmethod
+    def validate_channel_id(cls, v: str) -> str:
+        value = str(v).strip()
+        if not value:
+            raise ValueError("telegram_channel_id cannot be empty")
+
+        if value.startswith("@"):
+            value = value[1:]
+
+        if value.lstrip("-").isdigit():
+            return value
+
+        if not value.replace("_", "").isalnum():
+            raise ValueError(
+                "telegram_channel_id must be a numeric id (e.g. -100123...) "
+                "or a valid username"
+            )
+        return value
 
 
 # ── Singleton access ─────────────────────────────────────────────────────

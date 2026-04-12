@@ -14,7 +14,7 @@ Handles:
 from __future__ import annotations
 
 import asyncio
-from typing import Optional
+from typing import Optional, Union
 
 from telethon import TelegramClient, events
 from telethon.errors import (
@@ -41,7 +41,7 @@ class TelegramListener:
         api_id: int,
         api_hash: str,
         phone: str,
-        channel_id: int,
+        channel_id: Union[int, str],
         session_path: str,
         signal_queue: asyncio.Queue,
         catchup_messages: int = 10,
@@ -51,7 +51,7 @@ class TelegramListener:
             api_id: Telegram API ID
             api_hash: Telegram API hash
             phone: Phone number for auth
-            channel_id: Numeric channel ID to monitor
+            channel_id: Numeric channel ID or channel username to monitor
             session_path: Path to .session file
             signal_queue: Queue to push received messages into
             catchup_messages: Number of recent messages to fetch on startup
@@ -114,8 +114,9 @@ class TelegramListener:
             logger.info("Monitoring channel: '%s' (id=%d)", channel_name, self._channel_id)
         except Exception as e:
             logger.error(
-                "Failed to resolve channel ID %d. Ensure you've joined the channel. Error: %s",
-                self._channel_id, e,
+                "Failed to resolve channel '%s'. Ensure you've joined the channel. Error: %s",
+                self._channel_id,
+                e,
             )
             raise
 

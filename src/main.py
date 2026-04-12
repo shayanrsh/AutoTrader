@@ -21,6 +21,8 @@ import sys
 from datetime import datetime, timezone
 from typing import Optional
 
+from pydantic import ValidationError
+
 from src.config import get_settings, Settings
 from src.database import Database
 from src.telegram_listener import TelegramListener
@@ -491,6 +493,14 @@ async def main() -> None:
     # Load settings
     try:
         settings = get_settings()
+    except ValidationError as e:
+        print("❌ Configuration validation failed. Fix the following fields in config.env:")
+        for issue in e.errors():
+            field = ".".join(str(part) for part in issue.get("loc", []))
+            message = issue.get("msg", "invalid value")
+            print(f"   - {field}: {message}")
+        print("   Hint: run the installer setup wizard to regenerate required values.")
+        sys.exit(1)
     except Exception as e:
         print(f"❌ Configuration error: {e}")
         print("   Copy config.env.example to config.env and fill in your values.")
@@ -515,4 +525,10 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nShutdown requested by user.")
+    except Exception as e:
+        print(f"❌ Fatal startup error: {e}")
+        raise

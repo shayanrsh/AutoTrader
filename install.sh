@@ -36,6 +36,10 @@ WINE_PREFIX="/home/${TRADER_USER}/.wine"
 MT5_INSTALLER_URL="https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
 WIN_PYTHON_VERSION="3.11.9"
 WIN_PYTHON_URL="https://www.python.org/ftp/python/${WIN_PYTHON_VERSION}/python-${WIN_PYTHON_VERSION}-amd64.exe"
+RECOMMENDED_DISK_GB=5
+MIN_DISK_GB=2
+DASHBOARD_CMD="/usr/local/bin/atdash"
+DASHBOARD_SCRIPT="${INSTALL_DIR}/scripts/autotrader-dashboard.sh"
 
 USE_TUI=0
 INSTALL_MODE=""
@@ -60,6 +64,17 @@ info() { echo -e "${BLUE}[i]${NC} $1"; }
 warn() { echo -e "${YELLOW}[!]${NC} $1"; }
 err()  { echo -e "${RED}[✗]${NC} $1"; }
 step() { echo -e "\n${MAGENTA}${BOLD}━━━ Step $1: $2 ━━━${NC}"; }
+
+on_error() {
+    local line="$1"
+    local command="$2"
+    local code="$3"
+    err "Installer failed (line ${line}, exit=${code})"
+    err "Command: ${command}"
+    echo -e "${YELLOW}Tip:${NC} Check network access, package mirrors, and service logs."
+}
+
+trap 'on_error ${LINENO} "${BASH_COMMAND}" "$?"' ERR
 
 # ── UI Helpers ──────────────────────────────────────────────────────────────
 has_tty() {
@@ -132,20 +147,35 @@ ui_input() {
     echo "${value:-$default_value}"
 }
 
+ui_secret_input() {
+    local prompt="$1"
+    local default_value="$2"
+
+    if [[ ${USE_TUI} -eq 1 ]]; then
+        whiptail --title "AutoTrader" --passwordbox "${prompt}" 11 74 "${default_value}" 3>&1 1>&2 2>&3 < /dev/tty
+        return $?
+    fi
+
+    read -r -s -p "${prompt}: " value < /dev/tty
+    echo ""
+    if [[ -z "${value}" ]]; then
+        echo "${default_value}"
+    else
+        echo "${value}"
+    fi
+}
+
 select_mode() {
     if [[ ${USE_TUI} -eq 1 ]]; then
         local choice
         choice=$(whiptail \
             --title "AutoTrader — Main Menu" \
-            --menu "Choose an action:" 21 84 12 \
+            --menu "Choose an action:" 20 84 12 \
             "full" "Full install (system deps + Wine + MT5 + app + services)" \
             "app" "App-only install (code + venv + services)" \
             "update" "Update project (git pull + venv deps + restart services)" \
-            "status" "System status dashboard" \
-            "services" "Service manager (start/stop/restart/status/logs)" \
-            "health" "Health check (localhost:8080/health)" \
-            "backup" "Backup config.env" \
-            "config" "Open config.env editor" \
+            "setup" "Interactive config wizard (API keys, MT5, risk settings)" \
+            "dashboard" "Launch control dashboard (stats + controls)" \
             "quit" "Exit installer" \
             3>&1 1>&2 2>&3 < /dev/tty) || INSTALL_MODE="quit"
 
@@ -156,23 +186,17 @@ select_mode() {
         echo "  1) Full Install"
         echo "  2) App Only"
         echo "  3) Update Project"
-        echo "  4) System Status"
-        echo "  5) Service Manager"
-        echo "  6) Health Check"
-        echo "  7) Backup config.env"
-        echo "  8) Edit config.env"
-        echo "  9) Quit"
-        read -r -p "Choice [1-9]: " choice < /dev/tty
+        echo "  4) Interactive Config Wizard"
+        echo "  5) Launch Dashboard"
+        echo "  6) Quit"
+        read -r -p "Choice [1-6]: " choice < /dev/tty
 
         case "${choice}" in
             1) INSTALL_MODE="full" ;;
             2) INSTALL_MODE="app" ;;
             3) INSTALL_MODE="update" ;;
-            4) INSTALL_MODE="status" ;;
-            5) INSTALL_MODE="services" ;;
-            6) INSTALL_MODE="health" ;;
-            7) INSTALL_MODE="backup" ;;
-            8) INSTALL_MODE="config" ;;
+            4) INSTALL_MODE="setup" ;;
+            5) INSTALL_MODE="dashboard" ;;
             *) INSTALL_MODE="quit" ;;
         esac
     fi
@@ -196,9 +220,16 @@ preflight() {
     fi
 
     FREE_GB=$(df -BG / | tail -1 | awk '{print $4}' | tr -d 'G')
-    if [[ ${FREE_GB} -lt 5 ]]; then
-        err "Insufficient disk space. Need at least 5GB free, have ${FREE_GB}GB."
+    if [[ ${FREE_GB} -lt ${MIN_DISK_GB} ]]; then
+        err "Insufficient disk space. Need at least ${MIN_DISK_GB}GB free, have ${FREE_GB}GB."
         exit 1
+    fi
+
+    if [[ ${FREE_GB} -lt ${RECOMMENDED_DISK_GB} ]]; then
+        warn "Low disk space: ${FREE_GB}GB free (recommended: ${RECOMMENDED_DISK_GB}GB for full install)."
+        if ! ui_confirm "Low Disk Space" "You have ${FREE_GB}GB free. Continue anyway? (App-only or update mode recommended)"; then
+            exit 1
+        fi
     fi
 
     TOTAL_RAM_MB=$(free -m | awk '/^Mem:/{print $2}')
@@ -424,6 +455,7 @@ install_services() {
     step "10/10" "Installing Systemd Services"
 
     chmod +x "${INSTALL_DIR}/systemd/start_mt5_bridge.sh"
+    chmod +x "${INSTALL_DIR}/scripts/autotrader-dashboard.sh" 2>/dev/null || true
 
     cp "${INSTALL_DIR}/systemd/mt5-bridge.service" /etc/systemd/system/
     cp "${INSTALL_DIR}/systemd/autotrader.service" /etc/systemd/system/
@@ -435,119 +467,219 @@ install_services() {
     mkdir -p /var/log/autotrader
     chown "${TRADER_USER}:${TRADER_USER}" /var/log/autotrader
 
+    install_dashboard_command || warn "Dashboard command install skipped"
+
     log "Systemd services installed and enabled"
 }
 
 # ── Utility Actions (TUI extras) ───────────────────────────────────────────
+config_file() {
+    echo "${INSTALL_DIR}/config.env"
+}
+
+require_install_dir() {
+    if [[ ! -d "${INSTALL_DIR}" ]]; then
+        err "Project not found at ${INSTALL_DIR}. Run install first."
+        return 1
+    fi
+    return 0
+}
+
+get_env_value() {
+    local key="$1"
+    local file
+    file="$(config_file)"
+    if [[ ! -f "${file}" ]]; then
+        echo ""
+        return 0
+    fi
+    grep -E "^${key}=" "${file}" | head -1 | cut -d'=' -f2-
+}
+
+set_env_value() {
+    local key="$1"
+    local value="$2"
+    local file
+    file="$(config_file)"
+    local escaped
+    escaped=$(printf '%s' "${value}" | sed 's/[&|]/\\&/g')
+
+    if grep -qE "^${key}=" "${file}"; then
+        sed -i "s|^${key}=.*|${key}=${escaped}|" "${file}"
+    else
+        echo "${key}=${value}" >> "${file}"
+    fi
+}
+
+prompt_env_value() {
+    local key="$1"
+    local title="$2"
+    local hint="$3"
+    local fallback="$4"
+    local current
+    current=$(get_env_value "${key}")
+    if [[ -z "${current}" ]]; then
+        current="${fallback}"
+    fi
+
+    ui_msg "${title}" "${hint}"
+    local entered
+    entered=$(ui_input "${key}" "${current}") || return 0
+    if [[ -n "${entered}" ]]; then
+        set_env_value "${key}" "${entered}"
+    fi
+}
+
+prompt_env_secret() {
+    local key="$1"
+    local title="$2"
+    local hint="$3"
+    local fallback="$4"
+    local current
+    current=$(get_env_value "${key}")
+    if [[ -z "${current}" ]]; then
+        current="${fallback}"
+    fi
+
+    ui_msg "${title}" "${hint}"
+    local entered
+    entered=$(ui_secret_input "${key}" "${current}") || return 0
+    if [[ -n "${entered}" ]]; then
+        set_env_value "${key}" "${entered}"
+    fi
+}
+
+prepare_config_file() {
+    local file
+    file="$(config_file)"
+    if [[ ! -f "${file}" ]]; then
+        if [[ -f "${INSTALL_DIR}/config.env.example" ]]; then
+            cp "${INSTALL_DIR}/config.env.example" "${file}"
+            chown "${TRADER_USER}:${TRADER_USER}" "${file}" 2>/dev/null || true
+            chmod 600 "${file}" 2>/dev/null || true
+        else
+            err "Missing template: ${INSTALL_DIR}/config.env.example"
+            return 1
+        fi
+    fi
+    return 0
+}
+
+validate_required_config() {
+    local file
+    file="$(config_file)"
+    local missing=()
+    local required_keys=(
+        TELEGRAM_API_ID TELEGRAM_API_HASH TELEGRAM_PHONE TELEGRAM_CHANNEL_ID
+        NOTIFY_BOT_TOKEN NOTIFY_CHAT_ID GEMINI_API_KEY GROQ_API_KEY
+        MT5_ACCOUNT MT5_PASSWORD MT5_SERVER
+    )
+
+    for key in "${required_keys[@]}"; do
+        local value
+        value=$(grep -E "^${key}=" "${file}" | head -1 | cut -d'=' -f2-)
+        if [[ -z "${value}" || "${value}" =~ x{3,} || "${value}" == "12345678" || "${value}" == "abcdef1234567890abcdef1234567890" || "${value}" == "+1234567890" || "${value}" == "-1001234567890" || "${value}" == "YourMT5Password" ]]; then
+            missing+=("${key}")
+        fi
+    done
+
+    if (( ${#missing[@]} > 0 )); then
+        warn "Configuration still has placeholders/missing values: ${missing[*]}"
+        ui_msg "Config Incomplete" "Please complete these keys:\n${missing[*]}\n\nRun the setup wizard again from the menu."
+        return 1
+    fi
+
+    return 0
+}
+
+interactive_config_wizard() {
+    require_install_dir || return 1
+    prepare_config_file || return 1
+
+    ui_msg "Interactive Setup" "You'll now enter required settings with hints for where to get each value."
+
+    prompt_env_value "TELEGRAM_API_ID" "Telegram API ID" "Get from https://my.telegram.org/apps → API development tools." "12345678"
+    prompt_env_value "TELEGRAM_API_HASH" "Telegram API Hash" "Get from the same my.telegram.org app page (32-char hash)." ""
+    prompt_env_value "TELEGRAM_PHONE" "Telegram Phone" "Use full international format, e.g. +14155551234." "+1234567890"
+    prompt_env_value "TELEGRAM_CHANNEL_ID" "Telegram Channel" "Use channel username (without @) or numeric id (e.g. -100...)." "-1001234567890"
+
+    prompt_env_secret "NOTIFY_BOT_TOKEN" "Notify Bot Token" "Create bot in @BotFather and paste token." ""
+    prompt_env_value "NOTIFY_CHAT_ID" "Notify Chat ID" "Message your bot, then use @userinfobot to get your chat ID." "123456789"
+
+    prompt_env_secret "GEMINI_API_KEY" "Gemini API Key" "Get free key at https://aistudio.google.com/apikey" ""
+    prompt_env_secret "GROQ_API_KEY" "Groq API Key" "Get free key at https://console.groq.com/keys" ""
+
+    prompt_env_value "MT5_ACCOUNT" "MT5 Account" "From your Alpari account dashboard (MT5 account number)." "12345678"
+    prompt_env_secret "MT5_PASSWORD" "MT5 Password" "Your MT5 trading password (not website password)." ""
+    prompt_env_value "MT5_SERVER" "MT5 Server" "Typical values: Alpari-MT5 or Alpari-MT5-Demo." "Alpari-MT5"
+
+    if ui_confirm "Dry Run Mode" "Enable DRY_RUN mode for safety on first launch?"; then
+        set_env_value "DRY_RUN" "true"
+    else
+        set_env_value "DRY_RUN" "false"
+    fi
+
+    validate_required_config || return 1
+    log "Interactive setup completed and saved to $(config_file)"
+    return 0
+}
+
 backup_config() {
-    if [[ ! -f "${INSTALL_DIR}/config.env" ]]; then
-        warn "No config file found at ${INSTALL_DIR}/config.env"
+    local file
+    file="$(config_file)"
+    if [[ ! -f "${file}" ]]; then
+        warn "No config file found at ${file}"
         return 0
     fi
 
     local backup_path="${INSTALL_DIR}/config.env.backup.$(date +%Y%m%d_%H%M%S)"
-    cp "${INSTALL_DIR}/config.env" "${backup_path}"
+    cp "${file}" "${backup_path}"
     chown "${TRADER_USER}:${TRADER_USER}" "${backup_path}" 2>/dev/null || true
     chmod 600 "${backup_path}" 2>/dev/null || true
 
     log "Config backup created: ${backup_path}"
-    ui_msg "Backup Complete" "Config backup created:\n${backup_path}"
 }
 
 open_config_editor() {
-    if [[ ! -f "${INSTALL_DIR}/config.env" ]]; then
-        warn "No config file found; creating from template."
-        if [[ -f "${INSTALL_DIR}/config.env.example" ]]; then
-            cp "${INSTALL_DIR}/config.env.example" "${INSTALL_DIR}/config.env"
-            chown "${TRADER_USER}:${TRADER_USER}" "${INSTALL_DIR}/config.env" 2>/dev/null || true
-            chmod 600 "${INSTALL_DIR}/config.env" 2>/dev/null || true
-        else
-            err "Template not found at ${INSTALL_DIR}/config.env.example"
-            return 1
-        fi
-    fi
+    require_install_dir || return 1
+    prepare_config_file || return 1
 
     local editor_choice
     editor_choice=$(ui_input "Editor command" "nano") || return 0
-    ${editor_choice} "${INSTALL_DIR}/config.env"
+    ${editor_choice} "$(config_file)"
 }
 
-show_health_check() {
-    local output
-    if output=$(curl -sS --max-time 3 http://localhost:8080/health 2>/dev/null); then
-        ui_msg "Health Check" "${output}"
-    else
-        warn "Health endpoint unreachable on localhost:8080"
-        ui_msg "Health Check" "Health endpoint unreachable on localhost:8080"
+install_dashboard_command() {
+    if [[ ! -f "${DASHBOARD_SCRIPT}" ]]; then
+        warn "Dashboard script missing: ${DASHBOARD_SCRIPT}"
+        return 1
     fi
+
+    install -m 755 "${DASHBOARD_SCRIPT}" "${DASHBOARD_CMD}"
+    ln -sf "${DASHBOARD_CMD}" /usr/local/bin/atd
+    log "Dashboard commands installed: atdash (alias: atd)"
+    return 0
 }
 
-show_status_dashboard() {
-    local disk ram mt5_status app_status text
-    disk=$(df -h / | tail -1 | awk '{print $4 " free of " $2}')
-    ram=$(free -m | awk '/^Mem:/{printf "%sMB used / %sMB total", $3, $2}')
-    mt5_status=$(systemctl is-active mt5-bridge.service 2>/dev/null || echo "unknown")
-    app_status=$(systemctl is-active autotrader.service 2>/dev/null || echo "unknown")
-
-    text="Install path: ${INSTALL_DIR}\nDisk: ${disk}\nRAM: ${ram}\nmt5-bridge.service: ${mt5_status}\nautotrader.service: ${app_status}"
-
-    if [[ ${USE_TUI} -eq 1 ]]; then
-        whiptail --title "AutoTrader Status" --msgbox "${text}" 14 78
-    else
-        echo ""
-        echo -e "${BOLD}AutoTrader Status${NC}"
-        echo -e "${text}"
-    fi
-}
-
-service_manager() {
-    local action
-
-    if [[ ${USE_TUI} -eq 1 ]]; then
-        action=$(whiptail \
-            --title "Service Manager" \
-            --menu "Choose service action:" 18 76 10 \
-            "start" "Start mt5-bridge + autotrader" \
-            "stop" "Stop mt5-bridge + autotrader" \
-            "restart" "Restart mt5-bridge + autotrader" \
-            "status" "Show current status" \
-            "logs" "Show last 40 log lines" \
-            "back" "Back to main menu" \
-            3>&1 1>&2 2>&3) || action="back"
-    else
-        echo ""
-        echo "Service actions: start | stop | restart | status | logs | back"
-        read -r -p "Action: " action
+launch_dashboard() {
+    if [[ -x "${DASHBOARD_CMD}" ]]; then
+        "${DASHBOARD_CMD}" || true
+        return 0
     fi
 
-    case "${action}" in
-        start)
-            systemctl start mt5-bridge autotrader
-            log "Services started"
-            ;;
-        stop)
-            systemctl stop autotrader mt5-bridge
-            log "Services stopped"
-            ;;
-        restart)
-            systemctl restart mt5-bridge autotrader
-            log "Services restarted"
-            ;;
-        status)
-            systemctl --no-pager status mt5-bridge autotrader || true
-            ;;
-        logs)
-            journalctl -u mt5-bridge -u autotrader -n 40 --no-pager || true
-            ;;
-        *)
-            return 0
-            ;;
-    esac
+    warn "Dashboard command not installed yet. Run install first."
+    return 1
 }
 
 run_update_flow() {
     clone_repository
     setup_bot_venv
+
+    if ui_confirm "Config Wizard" "Run interactive config wizard now?"; then
+        interactive_config_wizard || warn "Config wizard was not completed"
+    fi
+
+    install_dashboard_command || true
 
     if ui_confirm "Restart Services" "Update finished. Restart mt5-bridge and autotrader now?"; then
         systemctl restart mt5-bridge autotrader 2>/dev/null || true
@@ -575,8 +707,8 @@ print_success() {
 
     echo -e "${BOLD}📋 Next Steps:${NC}"
     echo ""
-    echo -e "  ${CYAN}1.${NC} Edit your configuration:"
-    echo -e "     ${YELLOW}sudo -u ${TRADER_USER} nano ${INSTALL_DIR}/config.env${NC}"
+    echo -e "  ${CYAN}1.${NC} Open dashboard anytime:"
+    echo -e "     ${YELLOW}atdash${NC}  ${BLUE}(short alias: atd)${NC}"
     echo ""
     echo -e "  ${CYAN}2.${NC} First-time MT5 login (VNC required for GUI):"
     echo -e "     ${YELLOW}apt install -y tigervnc-standalone-server${NC}"
@@ -614,6 +746,7 @@ run_mode() {
             install_xvfb
             create_trader_user
             clone_repository
+            interactive_config_wizard || warn "Config wizard incomplete — edit config.env before going live"
             setup_wine_and_mt5
             setup_wine_python
             setup_bot_venv
@@ -624,6 +757,7 @@ run_mode() {
         app)
             create_trader_user
             clone_repository
+            interactive_config_wizard || warn "Config wizard incomplete — edit config.env before going live"
             setup_bot_venv
             install_services
             print_success
@@ -631,20 +765,11 @@ run_mode() {
         update)
             run_update_flow
             ;;
-        status)
-            show_status_dashboard
+        setup)
+            interactive_config_wizard
             ;;
-        services)
-            service_manager
-            ;;
-        health)
-            show_health_check
-            ;;
-        backup)
-            backup_config
-            ;;
-        config)
-            open_config_editor
+        dashboard)
+            launch_dashboard
             ;;
         quit)
             info "Exiting installer."
