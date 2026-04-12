@@ -37,16 +37,19 @@ MT5_INSTALLER_URL="https://download.mql5.com/cdn/web/metaquotes.software.corp/mt
 WIN_PYTHON_VERSION="3.11.9"
 WIN_PYTHON_URL="https://www.python.org/ftp/python/${WIN_PYTHON_VERSION}/python-${WIN_PYTHON_VERSION}-amd64.exe"
 
+USE_TUI=0
+INSTALL_MODE=""
+
 # ── Banner ──────────────────────────────────────────────────────────────────
 banner() {
     echo ""
     echo -e "${CYAN}${BOLD}"
     echo "  ╔══════════════════════════════════════════════════════════════╗"
     echo "  ║                                                              ║"
-    echo "  ║          🤖  AutoTrader — One-Line Installer  🤖            ║"
+    echo "  ║                🤖  AutoTrader Installer  🤖                 ║"
     echo "  ║                                                              ║"
-    echo "  ║   Automated XAUUSD Forex Trading System                     ║"
     echo "  ║   Telegram Signals → AI Parsing → MT5 Execution            ║"
+    echo "  ║   Full setup, updates, service tools, and health checks    ║"
     echo "  ║                                                              ║"
     echo "  ╚══════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
@@ -58,59 +61,136 @@ warn() { echo -e "${YELLOW}[!]${NC} $1"; }
 err()  { echo -e "${RED}[✗]${NC} $1"; }
 step() { echo -e "\n${MAGENTA}${BOLD}━━━ Step $1: $2 ━━━${NC}"; }
 
+# ── UI Helpers ──────────────────────────────────────────────────────────────
+can_use_tui() {
+    [[ -t 0 && -t 1 ]] && command -v whiptail >/dev/null 2>&1
+}
+
+ui_init() {
+    if can_use_tui; then
+        USE_TUI=1
+    else
+        USE_TUI=0
+        info "TUI unavailable (missing terminal or whiptail). Using text prompts."
+    fi
+}
+
+ui_msg() {
+    local title="$1"
+    local message="$2"
+
+    if [[ ${USE_TUI} -eq 1 ]]; then
+        whiptail --title "${title}" --msgbox "${message}" 14 74
+    else
+        echo ""
+        echo -e "${BOLD}${title}${NC}"
+        echo -e "${message}"
+    fi
+}
+
+ui_confirm() {
+    local title="$1"
+    local message="$2"
+
+    if [[ ${USE_TUI} -eq 1 ]]; then
+        whiptail --title "${title}" --yesno "${message}" 14 74
+        return $?
+    fi
+
+    echo ""
+    echo -e "${BOLD}${title}${NC}"
+    read -r -p "${message} [y/N]: " reply
+    [[ "${reply}" =~ ^[Yy]$ ]]
+}
+
+ui_input() {
+    local prompt="$1"
+    local default_value="$2"
+
+    if [[ ${USE_TUI} -eq 1 ]]; then
+        whiptail --title "AutoTrader" --inputbox "${prompt}" 11 74 "${default_value}" 3>&1 1>&2 2>&3
+        return $?
+    fi
+
+    read -r -p "${prompt} [${default_value}]: " value
+    echo "${value:-$default_value}"
+}
+
+select_mode() {
+    if [[ ${USE_TUI} -eq 1 ]]; then
+        local choice
+        choice=$(whiptail \
+            --title "AutoTrader — Main Menu" \
+            --menu "Choose an action:" 21 84 12 \
+            "full" "Full install (system deps + Wine + MT5 + app + services)" \
+            "app" "App-only install (code + venv + services)" \
+            "update" "Update project (git pull + venv deps + restart services)" \
+            "status" "System status dashboard" \
+            "services" "Service manager (start/stop/restart/status/logs)" \
+            "health" "Health check (localhost:8080/health)" \
+            "backup" "Backup config.env" \
+            "config" "Open config.env editor" \
+            "quit" "Exit installer" \
+            3>&1 1>&2 2>&3) || INSTALL_MODE="quit"
+
+        INSTALL_MODE="${choice:-quit}"
+    else
+        echo ""
+        echo -e "${BOLD}Select action:${NC}"
+        echo "  1) Full Install"
+        echo "  2) App Only"
+        echo "  3) Update Project"
+        echo "  4) System Status"
+        echo "  5) Service Manager"
+        echo "  6) Health Check"
+        echo "  7) Backup config.env"
+        echo "  8) Edit config.env"
+        echo "  9) Quit"
+        read -r -p "Choice [1-9]: " choice
+
+        case "${choice}" in
+            1) INSTALL_MODE="full" ;;
+            2) INSTALL_MODE="app" ;;
+            3) INSTALL_MODE="update" ;;
+            4) INSTALL_MODE="status" ;;
+            5) INSTALL_MODE="services" ;;
+            6) INSTALL_MODE="health" ;;
+            7) INSTALL_MODE="backup" ;;
+            8) INSTALL_MODE="config" ;;
+            *) INSTALL_MODE="quit" ;;
+        esac
+    fi
+
+    log "Selected action: ${INSTALL_MODE}"
+}
+
 # ── Preflight Checks ───────────────────────────────────────────────────────
 preflight() {
-    # Must be root
     if [[ $EUID -ne 0 ]]; then
         err "This installer must be run as root."
         echo -e "    Run: ${CYAN}sudo bash <(curl -Ls https://raw.githubusercontent.com/shayanrsh/AutoTrader/main/install.sh)${NC}"
         exit 1
     fi
 
-    # Must be Ubuntu
     if ! grep -qi "ubuntu" /etc/os-release 2>/dev/null; then
         warn "This installer is designed for Ubuntu 24.04 LTS."
-        read -p "Continue anyway? [y/N] " -n 1 -r
-        echo
-        [[ ! $REPLY =~ ^[Yy]$ ]] && exit 1
+        if ! ui_confirm "Compatibility Warning" "This installer is optimized for Ubuntu 24.04 LTS. Continue anyway?"; then
+            exit 1
+        fi
     fi
 
-    # Check disk space (need at least 5GB free)
     FREE_GB=$(df -BG / | tail -1 | awk '{print $4}' | tr -d 'G')
     if [[ ${FREE_GB} -lt 5 ]]; then
         err "Insufficient disk space. Need at least 5GB free, have ${FREE_GB}GB."
         exit 1
     fi
 
-    # Check RAM (need at least 2GB)
     TOTAL_RAM_MB=$(free -m | awk '/^Mem:/{print $2}')
     if [[ ${TOTAL_RAM_MB} -lt 1800 ]]; then
         warn "Low RAM detected (${TOTAL_RAM_MB}MB). Recommended: 4GB+."
     fi
 
     log "Preflight checks passed (${FREE_GB}GB disk free, ${TOTAL_RAM_MB}MB RAM)"
-}
-
-# ── Interactive Mode Selection ──────────────────────────────────────────────
-select_mode() {
-    echo ""
-    echo -e "${BOLD}Select installation mode:${NC}"
-    echo ""
-    echo -e "  ${CYAN}1)${NC} Full Install    — Everything: system packages, Wine, MT5, Python, firewall, services"
-    echo -e "  ${CYAN}2)${NC} App Only        — Bot code + Python venv only (system deps already installed)"
-    echo -e "  ${CYAN}3)${NC} Update          — Pull latest code and restart services"
-    echo ""
-    read -p "Choice [1/2/3]: " -n 1 -r INSTALL_MODE
-    echo ""
-
-    case "${INSTALL_MODE}" in
-        1) INSTALL_MODE="full" ;;
-        2) INSTALL_MODE="app" ;;
-        3) INSTALL_MODE="update" ;;
-        *) INSTALL_MODE="full" ;;
-    esac
-
-    log "Selected mode: ${INSTALL_MODE}"
 }
 
 # ============================================================================
@@ -182,11 +262,9 @@ clone_repository() {
         log "Repository cloned to ${INSTALL_DIR}"
     fi
 
-    # Create data directory
     mkdir -p "${INSTALL_DIR}/data"
     chown -R "${TRADER_USER}:${TRADER_USER}" "${INSTALL_DIR}/data"
 
-    # Create config if missing
     if [ ! -f "${INSTALL_DIR}/config.env" ]; then
         sudo -u "${TRADER_USER}" cp "${INSTALL_DIR}/config.env.example" "${INSTALL_DIR}/config.env"
         chmod 600 "${INSTALL_DIR}/config.env"
@@ -208,7 +286,6 @@ setup_wine_and_mt5() {
 
     log "Wine prefix initialized"
 
-    # Download MT5
     MT5_INSTALLER="/tmp/mt5setup.exe"
     if [ ! -f "${MT5_INSTALLER}" ]; then
         info "Downloading MetaTrader 5..."
@@ -285,7 +362,6 @@ setup_bot_venv() {
 setup_firewall() {
     step "9/10" "Configuring Firewall & Security"
 
-    # UFW
     apt install -y -qq ufw fail2ban 2>/dev/null
 
     ufw default deny incoming 2>/dev/null
@@ -294,7 +370,6 @@ setup_firewall() {
     yes | ufw enable 2>/dev/null
     log "UFW firewall enabled (SSH only)"
 
-    # SSH hardening
     SSHD_CONFIG="/etc/ssh/sshd_config"
     cp "${SSHD_CONFIG}" "${SSHD_CONFIG}.bak.$(date +%s)" 2>/dev/null || true
 
@@ -315,7 +390,6 @@ setup_firewall() {
     systemctl restart sshd 2>/dev/null || true
     log "SSH hardened (root login disabled)"
 
-    # fail2ban
     cat > /etc/fail2ban/jail.local << 'EOF'
 [sshd]
 enabled = true
@@ -342,11 +416,131 @@ install_services() {
     systemctl enable mt5-bridge.service
     systemctl enable autotrader.service
 
-    # Create log directory
     mkdir -p /var/log/autotrader
     chown "${TRADER_USER}:${TRADER_USER}" /var/log/autotrader
 
     log "Systemd services installed and enabled"
+}
+
+# ── Utility Actions (TUI extras) ───────────────────────────────────────────
+backup_config() {
+    if [[ ! -f "${INSTALL_DIR}/config.env" ]]; then
+        warn "No config file found at ${INSTALL_DIR}/config.env"
+        return 0
+    fi
+
+    local backup_path="${INSTALL_DIR}/config.env.backup.$(date +%Y%m%d_%H%M%S)"
+    cp "${INSTALL_DIR}/config.env" "${backup_path}"
+    chown "${TRADER_USER}:${TRADER_USER}" "${backup_path}" 2>/dev/null || true
+    chmod 600 "${backup_path}" 2>/dev/null || true
+
+    log "Config backup created: ${backup_path}"
+    ui_msg "Backup Complete" "Config backup created:\n${backup_path}"
+}
+
+open_config_editor() {
+    if [[ ! -f "${INSTALL_DIR}/config.env" ]]; then
+        warn "No config file found; creating from template."
+        if [[ -f "${INSTALL_DIR}/config.env.example" ]]; then
+            cp "${INSTALL_DIR}/config.env.example" "${INSTALL_DIR}/config.env"
+            chown "${TRADER_USER}:${TRADER_USER}" "${INSTALL_DIR}/config.env" 2>/dev/null || true
+            chmod 600 "${INSTALL_DIR}/config.env" 2>/dev/null || true
+        else
+            err "Template not found at ${INSTALL_DIR}/config.env.example"
+            return 1
+        fi
+    fi
+
+    local editor_choice
+    editor_choice=$(ui_input "Editor command" "nano") || return 0
+    ${editor_choice} "${INSTALL_DIR}/config.env"
+}
+
+show_health_check() {
+    local output
+    if output=$(curl -sS --max-time 3 http://localhost:8080/health 2>/dev/null); then
+        ui_msg "Health Check" "${output}"
+    else
+        warn "Health endpoint unreachable on localhost:8080"
+        ui_msg "Health Check" "Health endpoint unreachable on localhost:8080"
+    fi
+}
+
+show_status_dashboard() {
+    local disk ram mt5_status app_status text
+    disk=$(df -h / | tail -1 | awk '{print $4 " free of " $2}')
+    ram=$(free -m | awk '/^Mem:/{printf "%sMB used / %sMB total", $3, $2}')
+    mt5_status=$(systemctl is-active mt5-bridge.service 2>/dev/null || echo "unknown")
+    app_status=$(systemctl is-active autotrader.service 2>/dev/null || echo "unknown")
+
+    text="Install path: ${INSTALL_DIR}\nDisk: ${disk}\nRAM: ${ram}\nmt5-bridge.service: ${mt5_status}\nautotrader.service: ${app_status}"
+
+    if [[ ${USE_TUI} -eq 1 ]]; then
+        whiptail --title "AutoTrader Status" --msgbox "${text}" 14 78
+    else
+        echo ""
+        echo -e "${BOLD}AutoTrader Status${NC}"
+        echo -e "${text}"
+    fi
+}
+
+service_manager() {
+    local action
+
+    if [[ ${USE_TUI} -eq 1 ]]; then
+        action=$(whiptail \
+            --title "Service Manager" \
+            --menu "Choose service action:" 18 76 10 \
+            "start" "Start mt5-bridge + autotrader" \
+            "stop" "Stop mt5-bridge + autotrader" \
+            "restart" "Restart mt5-bridge + autotrader" \
+            "status" "Show current status" \
+            "logs" "Show last 40 log lines" \
+            "back" "Back to main menu" \
+            3>&1 1>&2 2>&3) || action="back"
+    else
+        echo ""
+        echo "Service actions: start | stop | restart | status | logs | back"
+        read -r -p "Action: " action
+    fi
+
+    case "${action}" in
+        start)
+            systemctl start mt5-bridge autotrader
+            log "Services started"
+            ;;
+        stop)
+            systemctl stop autotrader mt5-bridge
+            log "Services stopped"
+            ;;
+        restart)
+            systemctl restart mt5-bridge autotrader
+            log "Services restarted"
+            ;;
+        status)
+            systemctl --no-pager status mt5-bridge autotrader || true
+            ;;
+        logs)
+            journalctl -u mt5-bridge -u autotrader -n 40 --no-pager || true
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
+run_update_flow() {
+    clone_repository
+    setup_bot_venv
+
+    if ui_confirm "Restart Services" "Update finished. Restart mt5-bridge and autotrader now?"; then
+        systemctl restart mt5-bridge autotrader 2>/dev/null || true
+        log "Services restarted"
+    else
+        warn "Services not restarted automatically."
+    fi
+
+    print_update_success
 }
 
 # ============================================================================
@@ -396,15 +590,7 @@ print_update_success() {
     echo ""
 }
 
-# ============================================================================
-# MAIN
-# ============================================================================
-
-main() {
-    banner
-    preflight
-    select_mode
-
+run_mode() {
     case "${INSTALL_MODE}" in
         full)
             install_system_packages
@@ -427,12 +613,57 @@ main() {
             print_success
             ;;
         update)
-            clone_repository
-            setup_bot_venv
-            install_services
-            print_update_success
+            run_update_flow
+            ;;
+        status)
+            show_status_dashboard
+            ;;
+        services)
+            service_manager
+            ;;
+        health)
+            show_health_check
+            ;;
+        backup)
+            backup_config
+            ;;
+        config)
+            open_config_editor
+            ;;
+        quit)
+            info "Exiting installer."
+            return 1
+            ;;
+        *)
+            warn "Unknown action: ${INSTALL_MODE}"
+            return 1
             ;;
     esac
+
+    return 0
+}
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
+main() {
+    banner
+    ui_init
+    preflight
+
+    while true; do
+        select_mode
+        if ! run_mode; then
+            break
+        fi
+
+        if ! ui_confirm "Continue" "Return to main menu?"; then
+            break
+        fi
+    done
+
+    log "Installer finished."
 }
 
 main "$@"

@@ -195,15 +195,27 @@ python -m pytest tests/ -v
 
 **Dry-run mode** (`DRY_RUN=true`) parses signals and calculates trades but never executes — perfect for validating the system before going live.
 
-## ⚙️ Installer Modes
+## ⚙️ Installer TUI
 
-The installer supports three modes:
+The installer now opens an interactive TUI menu (`whiptail` when available, clean text fallback otherwise).
 
-| Mode | What it does |
+### Core actions
+
+| Action | What it does |
 |---|---|
 | **Full Install** | Everything: system packages, Wine, MT5, Python, firewall, services |
 | **App Only** | Bot code + Python venv (assumes system deps are installed) |
-| **Update** | Pull latest code and restart services |
+| **Update Project** | Pull latest code, refresh venv dependencies, optional service restart |
+
+### Extra utility actions
+
+| Action | What it does |
+|---|---|
+| **System Status** | Shows install path, disk/RAM usage, and service states |
+| **Service Manager** | Start/stop/restart services, inspect status, view recent logs |
+| **Health Check** | Queries `http://localhost:8080/health` |
+| **Backup config.env** | Creates timestamped config backups |
+| **Edit config.env** | Opens config file directly from the installer |
 
 ```bash
 # Full install (default)
