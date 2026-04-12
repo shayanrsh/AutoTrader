@@ -36,6 +36,9 @@ python-telegram-bot==21.10
 # HTTP client for Groq API calls
 httpx==0.28.1
 
+# Modern terminal UI framework for dashboard and controls
+textual==0.76.0
+
 # Cryptographic hashing (stdlib, listed for clarity)
 # hashlib — built-in, no install needed
 

@@ -27,8 +27,9 @@ The installer now includes:
 
 - Interactive setup wizard for all required credentials (`TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `GEMINI_API_KEY`, `GROQ_API_KEY`, `MT5_ACCOUNT`, etc.)
 - Guided hints on where each credential is obtained
-- TUI mode via `whiptail` with robust text fallback
+- Modern Textual dashboard UI (with shell fallback when unavailable)
 - Better failure reporting and safer preflight behavior
+- Rerun-safe virtual environment setup (second install/update runs no longer fail on existing `venv`)
 - Runtime dashboard command installation (`atdash`, alias `atd`)
 
 ## 🏗️ Architecture
@@ -43,16 +44,16 @@ Telegram Channel ──→ Telethon Listener ──→ asyncio.Queue ──→ A
 
 ## 🧩 Components
 
-| Module | Description |
-|---|---|
-| `src/telegram_listener.py` | Telethon-based channel monitor with reconnect and catch-up |
-| `src/ai_parser.py` | 3-tier parsing: Gemini → Groq → Regex fallback |
-| `src/risk_manager.py` | Per-trade risk cap, position limits, daily loss halt, deduplication |
-| `src/mt5_executor.py` | MT5 trade execution with retry and symbol auto-detection |
-| `src/notifier.py` | Telegram notifications for alerts/trades/errors |
-| `src/database.py` | Async SQLite persistence |
-| `src/health.py` | HTTP `/health` and `/metrics` endpoints |
-| `scripts/autotrader-dashboard.sh` | Runtime control dashboard installed as `atdash` |
+| Module                            | Description                                                         |
+| --------------------------------- | ------------------------------------------------------------------- |
+| `src/telegram_listener.py`        | Telethon-based channel monitor with reconnect and catch-up          |
+| `src/ai_parser.py`                | 3-tier parsing: Gemini → Groq → Regex fallback                      |
+| `src/risk_manager.py`             | Per-trade risk cap, position limits, daily loss halt, deduplication |
+| `src/mt5_executor.py`             | MT5 trade execution with retry and symbol auto-detection            |
+| `src/notifier.py`                 | Telegram notifications for alerts/trades/errors                     |
+| `src/database.py`                 | Async SQLite persistence                                            |
+| `src/health.py`                   | HTTP `/health` and `/metrics` endpoints                             |
+| `scripts/autotrader-dashboard.sh` | Runtime control dashboard installed as `atdash`                     |
 
 ## ⚙️ Installer UX
 
@@ -95,6 +96,7 @@ Dashboard includes:
 - DRY_RUN toggle with bot restart
 - Update + restart flow
 - Quick log access for `autotrader` and `mt5-bridge`
+- Keyboard shortcuts in TUI (`q` quit, `r` refresh, `l` bot logs, `b` bridge logs)
 
 ## 🚀 Quick Start
 

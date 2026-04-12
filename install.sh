@@ -44,6 +44,9 @@ DASHBOARD_SCRIPT="${INSTALL_DIR}/scripts/autotrader-dashboard.sh"
 USE_TUI=0
 INSTALL_MODE=""
 
+# Cache heavy installers between runs to avoid repeated downloads and stale /tmp reliance.
+INSTALLER_CACHE_DIR="/var/cache/autotrader"
+
 # ── Banner ──────────────────────────────────────────────────────────────────
 banner() {
     echo ""
@@ -225,19 +228,36 @@ preflight() {
         exit 1
     fi
 
-    if [[ ${FREE_GB} -lt ${RECOMMENDED_DISK_GB} ]]; then
-        warn "Low disk space: ${FREE_GB}GB free (recommended: ${RECOMMENDED_DISK_GB}GB for full install)."
-        if ! ui_confirm "Low Disk Space" "You have ${FREE_GB}GB free. Continue anyway? (App-only or update mode recommended)"; then
-            exit 1
-        fi
-    fi
-
     TOTAL_RAM_MB=$(free -m | awk '/^Mem:/{print $2}')
     if [[ ${TOTAL_RAM_MB} -lt 1800 ]]; then
         warn "Low RAM detected (${TOTAL_RAM_MB}MB). Recommended: 4GB+."
     fi
 
     log "Preflight checks passed (${FREE_GB}GB disk free, ${TOTAL_RAM_MB}MB RAM)"
+}
+
+mode_recommended_disk_gb() {
+    local mode="$1"
+    case "${mode}" in
+        full) echo "${RECOMMENDED_DISK_GB}" ;;
+        app|update|setup|dashboard) echo "${MIN_DISK_GB}" ;;
+        *) echo "${RECOMMENDED_DISK_GB}" ;;
+    esac
+}
+
+preflight_for_mode() {
+    local mode="$1"
+    local recommended
+    recommended=$(mode_recommended_disk_gb "${mode}")
+
+    if [[ ${FREE_GB} -lt ${recommended} ]]; then
+        warn "Low disk space for '${mode}': ${FREE_GB}GB free (recommended: ${recommended}GB)."
+        if ! ui_confirm "Low Disk Space" "You have ${FREE_GB}GB free for '${mode}'. Continue anyway?"; then
+            return 1
+        fi
+    fi
+
+    return 0
 }
 
 # ============================================================================
@@ -299,7 +319,7 @@ clone_repository() {
 
     if [ -d "${INSTALL_DIR}/.git" ]; then
         info "Repository already exists — pulling latest..."
-        sudo -u "${TRADER_USER}" bash -c "cd ${INSTALL_DIR} && git pull --ff-only origin main 2>/dev/null || git pull origin main"
+        sudo -u "${TRADER_USER}" bash -lc "set -euo pipefail; cd '${INSTALL_DIR}' && git pull --ff-only origin main 2>/dev/null || git pull origin main"
         log "Repository updated"
     else
         mkdir -p "$(dirname ${INSTALL_DIR})"
@@ -324,23 +344,30 @@ setup_wine_and_mt5() {
 
     info "Initializing Wine environment (this takes a minute)..."
 
-    sudo -u "${TRADER_USER}" bash -c "
+    sudo -u "${TRADER_USER}" bash -lc "
+        set -euo pipefail
         export WINEPREFIX=${WINE_PREFIX}
         export WINEARCH=win64
-        wineboot --init 2>/dev/null || true
-        sleep 5
-    " 2>/dev/null
+        mkdir -p \"${WINE_PREFIX}\"
+        if [[ ! -f \"${WINE_PREFIX}/.autotrader_wine_initialized\" ]]; then
+            wineboot --init 2>/dev/null
+            touch \"${WINE_PREFIX}/.autotrader_wine_initialized\"
+            sleep 5
+        fi
+    "
 
     log "Wine prefix initialized"
 
-    MT5_INSTALLER="/tmp/mt5setup.exe"
+    mkdir -p "${INSTALLER_CACHE_DIR}"
+    MT5_INSTALLER="${INSTALLER_CACHE_DIR}/mt5setup.exe"
     if [ ! -f "${MT5_INSTALLER}" ]; then
         info "Downloading MetaTrader 5..."
         wget -q --show-progress -O "${MT5_INSTALLER}" "${MT5_INSTALLER_URL}"
     fi
 
     info "Installing MetaTrader 5 (headless, ~30 seconds)..."
-    sudo -u "${TRADER_USER}" bash -c "
+    sudo -u "${TRADER_USER}" bash -lc "
+        set -euo pipefail
         export WINEPREFIX=${WINE_PREFIX}
         export DISPLAY=:99
 
@@ -353,7 +380,7 @@ setup_wine_and_mt5() {
 
         killall mt5setup.exe 2>/dev/null || true
         kill \$XVFB_PID 2>/dev/null || true
-    " 2>/dev/null
+    "
 
     log "MetaTrader 5 installed"
 }
@@ -361,14 +388,16 @@ setup_wine_and_mt5() {
 setup_wine_python() {
     step "7/10" "Installing Python in Wine"
 
-    WIN_PYTHON_INSTALLER="/tmp/python-${WIN_PYTHON_VERSION}-amd64.exe"
+    mkdir -p "${INSTALLER_CACHE_DIR}"
+    WIN_PYTHON_INSTALLER="${INSTALLER_CACHE_DIR}/python-${WIN_PYTHON_VERSION}-amd64.exe"
     if [ ! -f "${WIN_PYTHON_INSTALLER}" ]; then
         info "Downloading Windows Python ${WIN_PYTHON_VERSION}..."
         wget -q --show-progress -O "${WIN_PYTHON_INSTALLER}" "${WIN_PYTHON_URL}"
     fi
 
     info "Installing Python in Wine (headless, ~20 seconds)..."
-    sudo -u "${TRADER_USER}" bash -c "
+    sudo -u "${TRADER_USER}" bash -lc "
+        set -euo pipefail
         export WINEPREFIX=${WINE_PREFIX}
         export DISPLAY=:99
 
@@ -380,14 +409,15 @@ setup_wine_python() {
         sleep 20
 
         kill \$XVFB_PID 2>/dev/null || true
-    " 2>/dev/null
+    "
 
     info "Installing MT5 Python packages in Wine..."
-    sudo -u "${TRADER_USER}" bash -c "
+    sudo -u "${TRADER_USER}" bash -lc "
+        set -euo pipefail
         export WINEPREFIX=${WINE_PREFIX}
         wine python -m pip install --upgrade pip 2>/dev/null
         wine python -m pip install MetaTrader5 mt5linux 2>/dev/null
-    " 2>/dev/null
+    "
 
     log "Wine Python configured with MetaTrader5 + mt5linux"
 }
@@ -395,12 +425,27 @@ setup_wine_python() {
 setup_bot_venv() {
     step "8/10" "Setting Up Bot Virtual Environment"
 
-    sudo -u "${TRADER_USER}" bash -c "
-        cd ${INSTALL_DIR}
-        python3 -m venv venv
+    sudo -u "${TRADER_USER}" bash -lc "
+        set -euo pipefail
+        cd '${INSTALL_DIR}'
+
+        if [[ -d venv ]]; then
+            python3 -m venv --upgrade venv
+        else
+            python3 -m venv venv
+        fi
+
         source venv/bin/activate
         pip install --upgrade pip -q
-        pip install -r requirements.txt -q 2>/dev/null || pip install -r requirements-dev.txt -q
+
+        if [[ -f requirements.txt ]]; then
+            pip install -r requirements.txt -q
+        elif [[ -f requirements-dev.txt ]]; then
+            pip install -r requirements-dev.txt -q
+        else
+            echo 'No requirements file found' >&2
+            exit 1
+        fi
     "
 
     log "Python virtual environment ready"
@@ -795,6 +840,9 @@ main() {
 
     while true; do
         select_mode
+        if [[ "${INSTALL_MODE}" != "quit" ]]; then
+            preflight_for_mode "${INSTALL_MODE}" || break
+        fi
         if ! run_mode; then
             break
         fi
