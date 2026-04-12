@@ -253,8 +253,8 @@ class AutoTraderTUI(App[None]):
             self.log_line(f"[bold red]Installer not found at {script}[/]")
             return
 
-        self.log_line("Setup wizard should be run in an interactive shell:")
-        self.log_line(f"  sudo bash {script}  # then choose 'setup'")
+        self.log_line("Open installer UI from shell:")
+        self.log_line("  atinstall  # aliases: ati, autotrader-installer")
 
     def show_logs(self, unit: str) -> None:
         self.log_line(f"[bold cyan]Last logs for {unit}[/]")

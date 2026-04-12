@@ -40,9 +40,16 @@ RECOMMENDED_DISK_GB=5
 MIN_DISK_GB=2
 DASHBOARD_CMD="/usr/local/bin/atdash"
 DASHBOARD_SCRIPT="${INSTALL_DIR}/scripts/autotrader-dashboard.sh"
+INSTALLER_CMD="/usr/local/bin/atinstall"
+INSTALLER_SCRIPT="${INSTALL_DIR}/scripts/autotrader-installer.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 USE_TUI=0
 INSTALL_MODE=""
+NON_INTERACTIVE=0
+ASSUME_YES=0
+SKIP_CONFIG_WIZARD=0
+USE_TEXTUAL_INSTALLER=1
 
 # Cache heavy installers between runs to avoid repeated downloads and stale /tmp reliance.
 INSTALLER_CACHE_DIR="/var/cache/autotrader"
@@ -126,6 +133,11 @@ ui_confirm() {
     local title="$1"
     local message="$2"
 
+    if [[ ${NON_INTERACTIVE} -eq 1 ]]; then
+        [[ ${ASSUME_YES} -eq 1 ]]
+        return $?
+    fi
+
     if [[ ${USE_TUI} -eq 1 ]]; then
         whiptail --title "${title}" --yesno "${message}" 14 74 < /dev/tty > /dev/tty 2>&1
         return $?
@@ -141,6 +153,11 @@ ui_input() {
     local prompt="$1"
     local default_value="$2"
 
+    if [[ ${NON_INTERACTIVE} -eq 1 ]]; then
+        echo "${default_value}"
+        return 0
+    fi
+
     if [[ ${USE_TUI} -eq 1 ]]; then
         whiptail --title "AutoTrader" --inputbox "${prompt}" 11 74 "${default_value}" 3>&1 1>&2 2>&3 < /dev/tty
         return $?
@@ -153,6 +170,11 @@ ui_input() {
 ui_secret_input() {
     local prompt="$1"
     local default_value="$2"
+
+    if [[ ${NON_INTERACTIVE} -eq 1 ]]; then
+        echo "${default_value}"
+        return 0
+    fi
 
     if [[ ${USE_TUI} -eq 1 ]]; then
         whiptail --title "AutoTrader" --passwordbox "${prompt}" 11 74 "${default_value}" 3>&1 1>&2 2>&3 < /dev/tty
@@ -169,6 +191,14 @@ ui_secret_input() {
 }
 
 select_mode() {
+    if [[ ${NON_INTERACTIVE} -eq 1 ]]; then
+        if [[ -z "${INSTALL_MODE}" ]]; then
+            INSTALL_MODE="quit"
+        fi
+        log "Selected action: ${INSTALL_MODE}"
+        return 0
+    fi
+
     if [[ ${USE_TUI} -eq 1 ]]; then
         local choice
         choice=$(whiptail \
@@ -179,6 +209,7 @@ select_mode() {
             "update" "Update project (git pull + venv deps + restart services)" \
             "setup" "Interactive config wizard (API keys, MT5, risk settings)" \
             "dashboard" "Launch control dashboard (stats + controls)" \
+            "uninstall" "Uninstall AutoTrader (services, files, commands)" \
             "quit" "Exit installer" \
             3>&1 1>&2 2>&3 < /dev/tty) || INSTALL_MODE="quit"
 
@@ -191,8 +222,9 @@ select_mode() {
         echo "  3) Update Project"
         echo "  4) Interactive Config Wizard"
         echo "  5) Launch Dashboard"
-        echo "  6) Quit"
-        read -r -p "Choice [1-6]: " choice < /dev/tty
+        echo "  6) Uninstall Everything"
+        echo "  7) Quit"
+        read -r -p "Choice [1-7]: " choice < /dev/tty
 
         case "${choice}" in
             1) INSTALL_MODE="full" ;;
@@ -200,6 +232,7 @@ select_mode() {
             3) INSTALL_MODE="update" ;;
             4) INSTALL_MODE="setup" ;;
             5) INSTALL_MODE="dashboard" ;;
+            6) INSTALL_MODE="uninstall" ;;
             *) INSTALL_MODE="quit" ;;
         esac
     fi
@@ -240,13 +273,17 @@ mode_recommended_disk_gb() {
     local mode="$1"
     case "${mode}" in
         full) echo "${RECOMMENDED_DISK_GB}" ;;
-        app|update|setup|dashboard) echo "${MIN_DISK_GB}" ;;
+        app|update|setup|dashboard|uninstall) echo "${MIN_DISK_GB}" ;;
         *) echo "${RECOMMENDED_DISK_GB}" ;;
     esac
 }
 
 preflight_for_mode() {
     local mode="$1"
+    if [[ "${mode}" == "quit" || "${mode}" == "dashboard" || "${mode}" == "uninstall" ]]; then
+        return 0
+    fi
+
     local recommended
     recommended=$(mode_recommended_disk_gb "${mode}")
 
@@ -501,6 +538,7 @@ install_services() {
 
     chmod +x "${INSTALL_DIR}/systemd/start_mt5_bridge.sh"
     chmod +x "${INSTALL_DIR}/scripts/autotrader-dashboard.sh" 2>/dev/null || true
+    chmod +x "${INSTALL_DIR}/scripts/autotrader-installer.sh" 2>/dev/null || true
 
     cp "${INSTALL_DIR}/systemd/mt5-bridge.service" /etc/systemd/system/
     cp "${INSTALL_DIR}/systemd/autotrader.service" /etc/systemd/system/
@@ -513,6 +551,7 @@ install_services() {
     chown "${TRADER_USER}:${TRADER_USER}" /var/log/autotrader
 
     install_dashboard_command || warn "Dashboard command install skipped"
+    install_installer_command || warn "Installer command install skipped"
 
     log "Systemd services installed and enabled"
 }
@@ -702,7 +741,21 @@ install_dashboard_command() {
 
     install -m 755 "${DASHBOARD_SCRIPT}" "${DASHBOARD_CMD}"
     ln -sf "${DASHBOARD_CMD}" /usr/local/bin/atd
-    log "Dashboard commands installed: atdash (alias: atd)"
+    ln -sf "${DASHBOARD_CMD}" /usr/local/bin/autotrader-dashboard
+    log "Dashboard commands installed: atdash (aliases: atd, autotrader-dashboard)"
+    return 0
+}
+
+install_installer_command() {
+    if [[ ! -f "${INSTALLER_SCRIPT}" ]]; then
+        warn "Installer launcher script missing: ${INSTALLER_SCRIPT}"
+        return 1
+    fi
+
+    install -m 755 "${INSTALLER_SCRIPT}" "${INSTALLER_CMD}"
+    ln -sf "${INSTALLER_CMD}" /usr/local/bin/ati
+    ln -sf "${INSTALLER_CMD}" /usr/local/bin/autotrader-installer
+    log "Installer commands installed: atinstall (aliases: ati, autotrader-installer)"
     return 0
 }
 
@@ -720,7 +773,9 @@ run_update_flow() {
     clone_repository
     setup_bot_venv
 
-    if ui_confirm "Config Wizard" "Run interactive config wizard now?"; then
+    if [[ ${SKIP_CONFIG_WIZARD} -eq 1 ]]; then
+        info "Skipping config wizard (non-interactive mode)"
+    elif ui_confirm "Config Wizard" "Run interactive config wizard now?"; then
         interactive_config_wizard || warn "Config wizard was not completed"
     fi
 
@@ -734,6 +789,32 @@ run_update_flow() {
     fi
 
     print_update_success
+}
+
+uninstall_everything() {
+    step "X" "Uninstalling AutoTrader"
+
+    if ! ui_confirm "Uninstall Confirmation" "This will stop services, remove AutoTrader files, dashboard/installer commands, logs, trader user, Wine prefix, and installer cache. Continue?"; then
+        warn "Uninstall cancelled"
+        return 1
+    fi
+
+    systemctl disable --now autotrader mt5-bridge 2>/dev/null || true
+    rm -f /etc/systemd/system/autotrader.service /etc/systemd/system/mt5-bridge.service
+    systemctl daemon-reload || true
+
+    rm -f "${DASHBOARD_CMD}" /usr/local/bin/atd /usr/local/bin/autotrader-dashboard
+    rm -f "${INSTALLER_CMD}" /usr/local/bin/ati /usr/local/bin/autotrader-installer
+
+    rm -rf "${INSTALL_DIR}" /var/log/autotrader "${INSTALLER_CACHE_DIR}"
+    rm -rf "${WINE_PREFIX}"
+
+    if id "${TRADER_USER}" &>/dev/null; then
+        userdel -r "${TRADER_USER}" 2>/dev/null || true
+    fi
+
+    log "AutoTrader uninstall completed"
+    return 0
 }
 
 # ============================================================================
@@ -753,7 +834,10 @@ print_success() {
     echo -e "${BOLD}📋 Next Steps:${NC}"
     echo ""
     echo -e "  ${CYAN}1.${NC} Open dashboard anytime:"
-    echo -e "     ${YELLOW}atdash${NC}  ${BLUE}(short alias: atd)${NC}"
+    echo -e "     ${YELLOW}atdash${NC}  ${BLUE}(aliases: atd, autotrader-dashboard)${NC}"
+    echo -e ""
+    echo -e "  ${CYAN}1b.${NC} Open installer anytime:"
+    echo -e "     ${YELLOW}atinstall${NC}  ${BLUE}(aliases: ati, autotrader-installer)${NC}"
     echo ""
     echo -e "  ${CYAN}2.${NC} First-time MT5 login (VNC required for GUI):"
     echo -e "     ${YELLOW}apt install -y tigervnc-standalone-server${NC}"
@@ -791,7 +875,11 @@ run_mode() {
             install_xvfb
             create_trader_user
             clone_repository
-            interactive_config_wizard || warn "Config wizard incomplete — edit config.env before going live"
+            if [[ ${SKIP_CONFIG_WIZARD} -eq 1 ]]; then
+                info "Skipping config wizard (non-interactive mode)"
+            else
+                interactive_config_wizard || warn "Config wizard incomplete — edit config.env before going live"
+            fi
             setup_wine_and_mt5
             setup_wine_python
             setup_bot_venv
@@ -802,7 +890,11 @@ run_mode() {
         app)
             create_trader_user
             clone_repository
-            interactive_config_wizard || warn "Config wizard incomplete — edit config.env before going live"
+            if [[ ${SKIP_CONFIG_WIZARD} -eq 1 ]]; then
+                info "Skipping config wizard (non-interactive mode)"
+            else
+                interactive_config_wizard || warn "Config wizard incomplete — edit config.env before going live"
+            fi
             setup_bot_venv
             install_services
             print_success
@@ -811,10 +903,20 @@ run_mode() {
             run_update_flow
             ;;
         setup)
-            interactive_config_wizard
+            if [[ ${NON_INTERACTIVE} -eq 1 ]]; then
+                require_install_dir || return 1
+                prepare_config_file || return 1
+                validate_required_config || return 1
+                log "Configuration file validated"
+            else
+                interactive_config_wizard
+            fi
             ;;
         dashboard)
             launch_dashboard
+            ;;
+        uninstall)
+            uninstall_everything
             ;;
         quit)
             info "Exiting installer."
@@ -829,14 +931,99 @@ run_mode() {
     return 0
 }
 
+launch_textual_installer() {
+    local installer_py="${SCRIPT_DIR}/src/installer_tui.py"
+
+    if [[ ${USE_TEXTUAL_INSTALLER} -eq 0 || ${NON_INTERACTIVE} -eq 1 ]]; then
+        return 1
+    fi
+
+    if [[ ! -f "${installer_py}" ]]; then
+        return 1
+    fi
+
+    if ! has_tty || ! command -v python3 >/dev/null 2>&1; then
+        return 1
+    fi
+
+    if ! python3 -c "import textual" >/dev/null 2>&1; then
+        return 1
+    fi
+
+    AUTOTRADER_INSTALL_SCRIPT="${SCRIPT_DIR}/install.sh" python3 "${installer_py}"
+    return 0
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --mode)
+                INSTALL_MODE="$2"
+                shift 2
+                ;;
+            --non-interactive)
+                NON_INTERACTIVE=1
+                shift
+                ;;
+            --assume-yes)
+                ASSUME_YES=1
+                shift
+                ;;
+            --skip-config-wizard)
+                SKIP_CONFIG_WIZARD=1
+                shift
+                ;;
+            --no-textual)
+                USE_TEXTUAL_INSTALLER=0
+                shift
+                ;;
+            --textual-installer)
+                launch_textual_installer
+                exit $?
+                ;;
+            --help|-h)
+                cat <<'EOF'
+Usage: bash install.sh [options]
+
+Options:
+  --mode <full|app|update|setup|dashboard|uninstall|quit>
+  --non-interactive
+  --assume-yes
+  --skip-config-wizard
+  --no-textual
+  --textual-installer
+EOF
+                exit 0
+                ;;
+            *)
+                err "Unknown argument: $1"
+                exit 1
+                ;;
+        esac
+    done
+}
+
 # ============================================================================
 # MAIN
 # ============================================================================
 
 main() {
+    parse_args "$@"
+
+    if [[ -z "${INSTALL_MODE}" ]] && launch_textual_installer; then
+        exit 0
+    fi
+
     banner
     ui_init
     preflight
+
+    if [[ -n "${INSTALL_MODE}" ]]; then
+        preflight_for_mode "${INSTALL_MODE}" || exit 1
+        run_mode
+        log "Installer finished."
+        return 0
+    fi
 
     while true; do
         select_mode
@@ -847,7 +1034,7 @@ main() {
             break
         fi
 
-        if ! ui_confirm "Continue" "Return to main menu?"; then
+        if [[ ${NON_INTERACTIVE} -eq 1 ]] || ! ui_confirm "Continue" "Return to main menu?"; then
             break
         fi
     done

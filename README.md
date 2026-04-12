@@ -28,6 +28,7 @@ The installer now includes:
 - Interactive setup wizard for all required credentials (`TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `GEMINI_API_KEY`, `GROQ_API_KEY`, `MT5_ACCOUNT`, etc.)
 - Guided hints on where each credential is obtained
 - Modern Textual dashboard UI (with shell fallback when unavailable)
+- Modern Textual installer UI for setup/update/uninstall workflows
 - Better failure reporting and safer preflight behavior
 - Rerun-safe virtual environment setup (second install/update runs no longer fail on existing `venv`)
 - Runtime dashboard command installation (`atdash`, alias `atd`)
@@ -64,6 +65,7 @@ Telegram Channel ──→ Telethon Listener ──→ asyncio.Queue ──→ A
 - **Update Project**: git pull + dependency refresh + optional restart
 - **Setup Wizard**: re-run guided config onboarding
 - **Dashboard**: launch runtime dashboard
+- **Uninstall Everything**: removes services, commands, files, user, and cache
 
 ### Setup wizard fields (interactive)
 
@@ -87,6 +89,12 @@ After install:
 atdash
 # alias:
 atd
+
+# installer command:
+atinstall
+# aliases:
+ati
+autotrader-installer
 ```
 
 Dashboard includes:
@@ -97,6 +105,11 @@ Dashboard includes:
 - Update + restart flow
 - Quick log access for `autotrader` and `mt5-bridge`
 - Keyboard shortcuts in TUI (`q` quit, `r` refresh, `l` bot logs, `b` bridge logs)
+
+Installer command names:
+
+- `atinstall` (aliases: `ati`, `autotrader-installer`)
+- `atdash` (aliases: `atd`, `autotrader-dashboard`)
 
 ## 🚀 Quick Start
 
