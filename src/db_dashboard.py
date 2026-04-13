@@ -755,6 +755,11 @@ class Dashboard:
         self.stdscr.erase()
         h, w = self.stdscr.getmaxyx()
 
+        # Avoid curses ERR on very small terminals.
+        if h <= 0 or w <= 1:
+            self.stdscr.refresh()
+            return
+
         if not self.rows:
             self.offset = 0
             self.selected_row = 0
@@ -765,17 +770,22 @@ class Dashboard:
         self.stdscr.addnstr(0, 0, header, w - 1, curses.A_REVERSE)
 
         menu_y = 2
-        self.stdscr.addnstr(menu_y - 1, 0, "Menu", w - 1, curses.A_BOLD)
+        if menu_y - 1 < h - 1:
+            self.stdscr.addnstr(menu_y - 1, 0, "Menu", w - 1, curses.A_BOLD)
         for i, (label, _) in enumerate(self.menu_items):
+            y = menu_y + i
+            if y >= h - 2:
+                break
             attr = curses.A_STANDOUT if i == self.selected_menu else curses.A_NORMAL
-            self.stdscr.addnstr(menu_y + i, 0, f"{i + 1}. {label}", max(20, w // 4), attr)
+            self.stdscr.addnstr(y, 0, f"{i + 1}. {label}", max(1, min(max(20, w // 4), w - 1)), attr)
 
         content_x = max(24, w // 4 + 2)
         content_w = max(10, w - content_x - 1)
 
         if self.columns:
             col_line = " | ".join(self.columns)
-            self.stdscr.addnstr(2, content_x, _truncate(col_line, content_w), content_w, curses.A_BOLD)
+            if 2 < h - 1 and content_x < w - 1:
+                self.stdscr.addnstr(2, content_x, _truncate(col_line, content_w), content_w, curses.A_BOLD)
 
         visible_rows = max(5, h - 6)
 
@@ -799,11 +809,12 @@ class Dashboard:
             line = " | ".join(_truncate(v, 30) for v in values)
             row_index = self.offset + idx
             row_attr = curses.A_STANDOUT if row_index == self.selected_row else curses.A_NORMAL
-            self.stdscr.addnstr(y, content_x, _truncate(line, content_w), content_w, row_attr)
+            if content_x < w - 1:
+                self.stdscr.addnstr(y, content_x, _truncate(line, content_w), content_w, row_attr)
 
         footer = "Keys: Up/Down menu | Enter open | j/k select row | v view JSON | PgDn/PgUp page | r refresh | q quit"
         self.stdscr.addnstr(h - 1, 0, _truncate(footer, w - 1), w - 1, curses.A_REVERSE)
-        if self.message:
+        if self.message and h - 2 >= 0:
             self.stdscr.addnstr(h - 2, 0, _truncate(self.message, w - 1), w - 1)
 
         self.stdscr.refresh()
