@@ -15,7 +15,7 @@ import asyncio
 import getpass
 import re
 from pathlib import Path
-from typing import Union
+from typing import Callable, Union
 
 from telethon import TelegramClient
 from telethon.errors import (
@@ -56,13 +56,34 @@ def _read_env_values(env_path: Path) -> dict[str, str]:
     if not env_path.exists():
         return result
 
+    def _parse_env_value(raw_value: str) -> str:
+        value = raw_value.strip()
+        if not value:
+            return ""
+
+        if value[0] in {'"', "'"}:
+            quote = value[0]
+            if len(value) >= 2 and value[-1] == quote:
+                value = value[1:-1]
+            else:
+                value = value[1:]
+
+            if quote == '"':
+                value = value.replace(r"\\", "\\").replace(r'\"', '"')
+            else:
+                value = value.replace(r"\\", "\\").replace(r"\'", "'")
+            return value
+
+        # Treat inline comments only for unquoted values.
+        return re.sub(r"\s+#.*$", "", value).strip()
+
     for raw_line in env_path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
 
         key, value = line.split("=", 1)
-        result[key.strip()] = value.strip()
+        result[key.strip()] = _parse_env_value(value)
 
     return result
 
@@ -143,7 +164,12 @@ def _update_env_key(env_path: Path, key: str, value: str) -> None:
     else:
         lines = []
 
-    new_line = f"{key}={value}"
+    write_value = value
+    if key == "TELEGRAM_PASSWORD":
+        escaped = value.replace("\\", r"\\").replace('"', r'\"')
+        write_value = f'"{escaped}"'
+
+    new_line = f"{key}={write_value}"
     replaced = False
     out: list[str] = []
 
@@ -332,28 +358,39 @@ async def _ensure_authorized(
 
     print("No active session found. Starting interactive login...")
 
+    async def _complete_2fa_login(initial_password: str = "") -> None:
+        """Finalize login with 2FA password without restarting code delivery."""
+        password_candidate = initial_password.strip()
+        used_saved_password = bool(password_candidate)
+
+        while True:
+            if not password_candidate:
+                password_candidate = getpass.getpass("Telegram 2FA password: ").strip()
+                if not password_candidate:
+                    raise RuntimeError("Telegram 2FA password cannot be empty")
+
+            try:
+                await client.sign_in(password=password_candidate)
+                _update_env_key(env_path, "TELEGRAM_PASSWORD", password_candidate)
+                print("Updated TELEGRAM_PASSWORD in config.env")
+                return
+            except PasswordHashInvalidError:
+                if used_saved_password:
+                    print("Saved TELEGRAM_PASSWORD is invalid. Please enter it again.")
+                else:
+                    print("Invalid Telegram 2FA password. Please try again.")
+                password_candidate = ""
+                used_saved_password = False
+
     try:
         if password_from_env:
             await client.start(phone=phone, password=password_from_env)
         else:
             await client.start(phone=phone)
     except SessionPasswordNeededError:
-        entered_password = getpass.getpass("Telegram 2FA password: ").strip()
-        if not entered_password:
-            raise RuntimeError("Telegram 2FA password cannot be empty")
-
-        await client.start(phone=phone, password=entered_password)
-        _update_env_key(env_path, "TELEGRAM_PASSWORD", entered_password)
-        print("Saved TELEGRAM_PASSWORD to config.env")
+        await _complete_2fa_login(password_from_env)
     except PasswordHashInvalidError:
-        print("Saved TELEGRAM_PASSWORD is invalid. Please enter it again.")
-        entered_password = getpass.getpass("Telegram 2FA password: ").strip()
-        if not entered_password:
-            raise RuntimeError("Telegram 2FA password cannot be empty")
-
-        await client.start(phone=phone, password=entered_password)
-        _update_env_key(env_path, "TELEGRAM_PASSWORD", entered_password)
-        print("Updated TELEGRAM_PASSWORD in config.env")
+        await _complete_2fa_login()
     except AuthKeyUnregisteredError:
         print("Session is invalid. Remove session file and run setup again.")
         raise
@@ -388,19 +425,40 @@ async def _run_search_mode(
     save_path = _save_channel_inventory(channel_rows)
     print(f"Saved channel inventory to: {save_path}")
 
-    if query.strip():
-        _print_filtered_channel_rows(channel_rows, query)
+    def _handle_add(tokens: list[str]) -> None:
+        merged_value = _append_channels_to_env(env_path, tokens)
+        print(f"Updated config.env: TELEGRAM_CHANNEL_ID={merged_value}")
+
+    _run_channel_search_loop(
+        channel_rows=channel_rows,
+        initial_query=query,
+        on_add=_handle_add,
+        prompt_label="search",
+    )
+
+
+def _run_channel_search_loop(
+    channel_rows: list[tuple[int, str, str, str]],
+    initial_query: str = "",
+    on_add: Callable[[list[str]], None] | None = None,
+    prompt_label: str = "search",
+) -> list[str]:
+    """Shared interactive channel search/add loop used by setup and search modes."""
+    if initial_query.strip():
+        _print_filtered_channel_rows(channel_rows, initial_query)
     else:
         _print_channel_rows(channel_rows)
 
-    print("\nSearch mode commands:")
+    print("\nSearch commands:")
     print("  - Type any text to search")
     print("  - add <selectors>   (e.g. add 194.  or  add 2,8,-1001234567890)")
     print("  - show              (show all channels)")
-    print("  - done              (finish search mode)")
+    print("  - done              (finish)")
+
+    staged_tokens: list[str] = []
 
     while True:
-        command = input("\nsearch> ").strip()
+        command = input(f"\n{prompt_label}> ").strip()
         if not command:
             continue
 
@@ -419,16 +477,21 @@ async def _run_search_mode(
                 continue
 
             try:
-                selected_tokens = _parse_channel_selection_input(selector, channel_rows)
+                parsed_tokens = _parse_channel_selection_input(selector, channel_rows)
             except ValueError as exc:
                 print(f"Invalid input: {exc}")
                 continue
 
-            merged_value = _append_channels_to_env(env_path, selected_tokens)
-            print(f"Updated config.env: TELEGRAM_CHANNEL_ID={merged_value}")
+            if on_add is not None:
+                on_add(parsed_tokens)
+            else:
+                staged_tokens = _merge_channel_tokens(staged_tokens, parsed_tokens)
+                print(f"Staged channel selection: {','.join(staged_tokens)}")
             continue
 
         _print_filtered_channel_rows(channel_rows, command)
+
+    return staged_tokens
 
 
 async def run_interactive_setup() -> None:
@@ -493,7 +556,6 @@ async def run_interactive_setup() -> None:
 
     print("\nDiscovering available channels/groups...")
     channel_rows = await _fetch_channel_rows(client)
-    _print_channel_rows(channel_rows)
     save_path = _save_channel_inventory(channel_rows)
     print(f"Saved channel inventory to: {save_path}")
 
@@ -501,32 +563,22 @@ async def run_interactive_setup() -> None:
     if current_value:
         print(f"\nCurrent TELEGRAM_CHANNEL_ID in config.env: {current_value}")
 
-    print("\nEnter TELEGRAM_CHANNEL_ID value to save.")
-    print("You can use one or multiple values separated by commas.")
-    print("Supported inputs:")
-    print("  - list number(s): 194.  or  1,5,12")
-    print("  - channel id(s):  -1001234567890")
-    print("  - username(s):    channel_username")
-    print("Examples: 194.")
-    print("          2,8,15")
-    print("          -1001234567890,-1009876543210")
-    print("          channel_username")
-    print("Press Enter to skip writing and keep current value.")
+    print("\nSetup mode channel selection.")
+    print("Use search + add commands, then type 'done' to save selected values.")
 
-    raw_input_value = input("\nChannel value(s): ").strip()
-    if not raw_input_value:
+    selected_tokens = _run_channel_search_loop(
+        channel_rows=channel_rows,
+        initial_query=args.query,
+        on_add=None,
+        prompt_label="setup",
+    )
+
+    if not selected_tokens:
         print("Skipped writing TELEGRAM_CHANNEL_ID.")
         await client.disconnect()
         return
 
-    try:
-        parsed = _parse_channel_selection_input(raw_input_value, channel_rows)
-    except ValueError as exc:
-        print(f"Invalid input: {exc}")
-        await client.disconnect()
-        return
-
-    merged_value = ",".join(parsed)
+    merged_value = ",".join(selected_tokens)
     _update_env_key(env_path, "TELEGRAM_CHANNEL_ID", merged_value)
     print(f"Updated config.env: TELEGRAM_CHANNEL_ID={merged_value}")
 

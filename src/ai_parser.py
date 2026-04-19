@@ -23,7 +23,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-import httpx
+try:
+    import httpx
+except Exception as exc:
+    httpx = None  # type: ignore[assignment]
+    _HTTPX_IMPORT_ERROR = exc
+else:
+    _HTTPX_IMPORT_ERROR = None
 
 try:
     from google import genai as modern_genai
@@ -36,33 +42,71 @@ else:
     _MODERN_GENAI_IMPORT_ERROR = None
 
 try:
-    from src.models import ParsedSignal, TradeAction
-    from src.database import Database
-    from src.models import SignalRecord
-    from src.regex_parser import RegexParser
     from src.utils import get_logger
-except ModuleNotFoundError:
-    # Supports direct execution from src/ (python3 ai_parser.py).
-    project_root = Path(__file__).resolve().parent.parent
-    if str(project_root) not in sys.path:
-        sys.path.insert(0, str(project_root))
-
-    from src.models import ParsedSignal, TradeAction
-    from src.database import Database
-    from src.models import SignalRecord
-    from src.regex_parser import RegexParser
-    from src.utils import get_logger
-
-try:
-    from src.config import get_settings
 except ModuleNotFoundError:
     project_root = Path(__file__).resolve().parent.parent
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
-    from src.config import get_settings
+    from src.utils import get_logger
+
+# Lazily imported runtime symbols so --help works even if heavy deps are missing.
+ParsedSignal = None  # type: ignore[assignment]
+TradeAction = None  # type: ignore[assignment]
+Database = None  # type: ignore[assignment]
+SignalRecord = None  # type: ignore[assignment]
+RegexParser = None  # type: ignore[assignment]
+get_settings = None  # type: ignore[assignment]
+
+
+def _ensure_runtime_imports() -> None:
+    """Import runtime modules only when actual parsing/runtime execution is requested."""
+    global ParsedSignal, TradeAction, Database, SignalRecord, RegexParser, get_settings
+
+    if all(
+        symbol is not None
+        for symbol in (ParsedSignal, TradeAction, Database, SignalRecord, RegexParser, get_settings)
+    ):
+        return
+
+    project_root = Path(__file__).resolve().parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+
+    try:
+        from src.config import get_settings as _get_settings
+        from src.database import Database as _Database
+        from src.models import ParsedSignal as _ParsedSignal
+        from src.models import SignalRecord as _SignalRecord
+        from src.models import TradeAction as _TradeAction
+        from src.regex_parser import RegexParser as _RegexParser
+    except ModuleNotFoundError as exc:
+        missing_name = getattr(exc, "name", "unknown dependency")
+        raise RuntimeError(
+            "Missing runtime dependency '"
+            f"{missing_name}' for ai_parser execution. "
+            "Install project dependencies and rerun, for example:\n"
+            "  cd /root/Projects/AutoTrader\n"
+            "  python3 -m venv venv\n"
+            "  source venv/bin/activate\n"
+            "  pip install -r requirements.txt\n"
+            "Then run:\n"
+            "  ./venv/bin/python src/ai_parser.py --mode local-only --limit 200"
+        ) from exc
+
+    ParsedSignal = _ParsedSignal
+    TradeAction = _TradeAction
+    Database = _Database
+    SignalRecord = _SignalRecord
+    RegexParser = _RegexParser
+    get_settings = _get_settings
 
 logger = get_logger("ai_parser")
-GOOGLE_DEFAULT_MODEL = "gemma-3-4b-it"
+GEMINI_FALLBACK_MODELS = (
+    "gemma-3n-e2b-it",
+    "gemma-3-4b-it",
+    "gemma-4-26b-a4b-it",
+)
+GOOGLE_DEFAULT_MODEL = GEMINI_FALLBACK_MODELS[0]
 
 
 def _extract_json_object(text: str) -> str:
@@ -191,6 +235,10 @@ class OllamaParser:
 
     async def parse(self, raw_text: str) -> Optional[dict]:
         """Send text to local Ollama and parse JSON response."""
+        if httpx is None:
+            logger.error("httpx dependency missing for Ollama parser: %r", _HTTPX_IMPORT_ERROR)
+            return None
+
         if not self._limiter.allow():
             logger.warning(
                 "Ollama local rate limit reached for model=%s. Skipping request.",
@@ -277,26 +325,82 @@ class GeminiParser:
     def __init__(
         self,
         api_key: str,
-        model: str = "gemini-2.5-flash",
+        model: str = GOOGLE_DEFAULT_MODEL,
         rpm_limit: int = 0,
         rpd_limit: int = 0,
+        rate_limits_by_model: Optional[dict[str, tuple[int, int]]] = None,
     ) -> None:
         self._api_key = api_key.strip()
-        self._model_name = model
-        self._limiter = LocalRateLimiter(rpm=rpm_limit, rpd=rpd_limit)
+        self._default_limits = (max(0, int(rpm_limit)), max(0, int(rpd_limit)))
+        self._rate_limits_by_model = rate_limits_by_model or {}
+        preferred_model = self._normalize_model_name(model)
+        self._model_candidates = self._build_model_candidates(preferred_model)
+        self._limiters: dict[str, LocalRateLimiter] = {}
+        self._active_model_name = self._model_candidates[0]
         self._last_status_code: Optional[int] = None
-        if model.startswith("models/"):
-            model_path = model
-        else:
-            model_path = f"models/{model}"
-        self._endpoint = (
-            f"https://generativelanguage.googleapis.com/v1beta/"
-            f"{model_path}:generateContent"
-        )
 
         if not self._api_key:
             logger.warning("Gemini parser initialized without API key")
-        logger.info("Gemini parser initialized: model=%s", model)
+        logger.info(
+            "Gemini parser initialized with fallback chain: %s",
+            " -> ".join(self._model_candidates),
+        )
+
+    @staticmethod
+    def _normalize_model_name(model: str) -> str:
+        value = str(model).strip().lower()
+        if value.startswith("models/"):
+            value = value.split("/", 1)[1]
+
+        # Backward-compatible aliases for common/older naming conventions.
+        aliases = {
+            "gemma-3-2b-it": "gemma-3n-e2b-it",
+            "gemma-3-2b": "gemma-3n-e2b-it",
+            "gemma 3 2b": "gemma-3n-e2b-it",
+        }
+        return aliases.get(value, value)
+
+    def _build_model_candidates(self, preferred_model: str) -> list[str]:
+        candidates: list[str] = []
+        for candidate in (preferred_model, *GEMINI_FALLBACK_MODELS):
+            normalized = self._normalize_model_name(candidate)
+            if normalized and normalized not in candidates:
+                candidates.append(normalized)
+        return candidates or [GOOGLE_DEFAULT_MODEL]
+
+    def _endpoint_for_model(self, model_name: str) -> str:
+        return (
+            f"https://generativelanguage.googleapis.com/v1beta/"
+            f"models/{model_name}:generateContent"
+        )
+
+    def _limiter_for_model(self, model_name: str) -> LocalRateLimiter:
+        existing = self._limiters.get(model_name)
+        if existing is not None:
+            return existing
+
+        rpm, rpd = self._rate_limits_by_model.get(model_name, self._default_limits)
+        limiter = LocalRateLimiter(rpm=rpm, rpd=rpd)
+        self._limiters[model_name] = limiter
+        return limiter
+
+    @staticmethod
+    def _model_unavailable(status_code: int, body: str) -> bool:
+        if status_code == 404:
+            return True
+
+        if status_code != 400:
+            return False
+
+        lowered = body.lower()
+        markers = (
+            "model not found",
+            "not found",
+            "unsupported model",
+            "not available",
+            "does not exist",
+        )
+        return any(marker in lowered for marker in markers)
 
     async def parse(self, raw_text: str) -> Optional[dict]:
         """
@@ -310,15 +414,12 @@ class GeminiParser:
         """
         try:
             self._last_status_code = None
-            if not self._api_key:
-                logger.error("Gemini API key is missing")
+            if httpx is None:
+                logger.error("httpx dependency missing for Gemini parser: %r", _HTTPX_IMPORT_ERROR)
                 return None
 
-            if not self._limiter.allow():
-                logger.warning(
-                    "Gemini local rate limit reached for model=%s. Skipping request.",
-                    self._model_name,
-                )
+            if not self._api_key:
+                logger.error("Gemini API key is missing")
                 return None
 
             def _build_payload(use_system_instruction: bool, use_json_mode: bool) -> dict:
@@ -383,67 +484,107 @@ class GeminiParser:
                 "X-goog-api-key": self._api_key,
             }
             async with httpx.AsyncClient(timeout=45.0) as client:
-                response = await client.post(self._endpoint, headers=headers, json=payload)
+                for model_name in self._model_candidates:
+                    limiter = self._limiter_for_model(model_name)
+                    if not limiter.allow():
+                        logger.warning(
+                            "Gemini local rate limit reached for model=%s. Trying next fallback model.",
+                            model_name,
+                        )
+                        continue
 
-                if response.status_code == 400 and "Developer instruction is not enabled" in response.text:
-                    logger.info(
-                        "Gemini model=%s does not support system_instruction; retrying without it",
-                        self._model_name,
-                    )
-                    use_system_instruction = False
+                    use_system_instruction = True
+                    use_json_mode = True
                     payload = _build_payload(
                         use_system_instruction=use_system_instruction,
                         use_json_mode=use_json_mode,
                     )
-                    response = await client.post(self._endpoint, headers=headers, json=payload)
+                    endpoint = self._endpoint_for_model(model_name)
 
-                if response.status_code == 400 and "JSON mode is not enabled" in response.text:
-                    logger.info(
-                        "Gemini model=%s does not support JSON mode; retrying without response schema",
-                        self._model_name,
-                    )
-                    use_json_mode = False
-                    payload = _build_payload(
-                        use_system_instruction=use_system_instruction,
-                        use_json_mode=use_json_mode,
-                    )
-                    response = await client.post(self._endpoint, headers=headers, json=payload)
+                    response = await client.post(endpoint, headers=headers, json=payload)
 
-            if response.status_code >= 400:
-                self._last_status_code = int(response.status_code)
-                if response.status_code == 429:
-                    logger.warning("Gemini rate limit hit: status=429 body=%s", response.text[:300])
-                elif response.status_code in {401, 403}:
-                    logger.error("Gemini API key invalid or unauthorized: status=%d", response.status_code)
-                else:
-                    logger.error("Gemini API error: status=%d body=%s", response.status_code, response.text[:300])
-                return None
+                    if response.status_code == 400 and "Developer instruction is not enabled" in response.text:
+                        logger.info(
+                            "Gemini model=%s does not support system_instruction; retrying without it",
+                            model_name,
+                        )
+                        use_system_instruction = False
+                        payload = _build_payload(
+                            use_system_instruction=use_system_instruction,
+                            use_json_mode=use_json_mode,
+                        )
+                        response = await client.post(endpoint, headers=headers, json=payload)
 
-            body = response.json()
-            candidates = body.get("candidates") or []
-            if not candidates:
-                logger.warning("Gemini returned no candidates")
-                return None
+                    if response.status_code == 400 and "JSON mode is not enabled" in response.text:
+                        logger.info(
+                            "Gemini model=%s does not support JSON mode; retrying without response schema",
+                            model_name,
+                        )
+                        use_json_mode = False
+                        payload = _build_payload(
+                            use_system_instruction=use_system_instruction,
+                            use_json_mode=use_json_mode,
+                        )
+                        response = await client.post(endpoint, headers=headers, json=payload)
 
-            content = (candidates[0] or {}).get("content") or {}
-            parts = content.get("parts") or []
-            text = ""
-            for part in parts:
-                part_text = (part or {}).get("text")
-                if part_text:
-                    text += str(part_text)
-            text = text.strip()
+                    if response.status_code >= 400:
+                        self._last_status_code = int(response.status_code)
+                        if self._model_unavailable(response.status_code, response.text):
+                            logger.warning(
+                                "Gemini model unavailable: %s (status=%d). Trying next fallback model.",
+                                model_name,
+                                response.status_code,
+                            )
+                            continue
 
-            if not text:
-                logger.warning("Gemini returned empty response")
-                return None
+                        if response.status_code == 429:
+                            logger.warning("Gemini rate limit hit: status=429 body=%s", response.text[:300])
+                        elif response.status_code in {401, 403}:
+                            logger.error("Gemini API key invalid or unauthorized: status=%d", response.status_code)
+                        else:
+                            logger.error("Gemini API error: status=%d body=%s", response.status_code, response.text[:300])
+                        return None
 
-            try:
-                result = json.loads(text)
-            except json.JSONDecodeError:
-                result = _parse_json_relaxed(text)
-            logger.debug("Gemini raw response: %s", result)
-            return result
+                    body = response.json()
+                    candidates = body.get("candidates") or []
+                    if not candidates:
+                        logger.warning("Gemini returned no candidates for model=%s", model_name)
+                        continue
+
+                    content = (candidates[0] or {}).get("content") or {}
+                    parts = content.get("parts") or []
+                    text = ""
+                    for part in parts:
+                        part_text = (part or {}).get("text")
+                        if part_text:
+                            text += str(part_text)
+                    text = text.strip()
+
+                    if not text:
+                        logger.warning("Gemini returned empty response for model=%s", model_name)
+                        continue
+
+                    try:
+                        result = json.loads(text)
+                    except json.JSONDecodeError:
+                        result = _parse_json_relaxed(text)
+
+                    if model_name != self._active_model_name:
+                        logger.info(
+                            "Gemini model switch successful: %s -> %s",
+                            self._active_model_name,
+                            model_name,
+                        )
+                        self._active_model_name = model_name
+
+                    logger.debug("Gemini raw response (model=%s): %s", model_name, result)
+                    return result
+
+            logger.warning(
+                "All configured Gemini models failed/unavailable: %s",
+                ", ".join(self._model_candidates),
+            )
+            return None
 
         except json.JSONDecodeError as e:
             logger.warning("Gemini returned invalid JSON: %s", e)
@@ -493,6 +634,10 @@ class GrokParser:
             Parsed dict with signal data, or None on failure.
         """
         try:
+            if httpx is None:
+                logger.error("httpx dependency missing for Grok parser: %r", _HTTPX_IMPORT_ERROR)
+                return None
+
             if not self._limiter.allow():
                 logger.warning(
                     "xAI local rate limit reached for model=%s. Skipping request.",
@@ -579,13 +724,24 @@ class AISignalParser:
         ollama_rate_limits: Optional[dict[str, tuple[int, int]]] = None,
         gemini_rate_limits: Optional[dict[str, tuple[int, int]]] = None,
         xai_rate_limits: Optional[dict[str, tuple[int, int]]] = None,
+        provider_mode: str = "hybrid",
+        cloud_provider: str = "all",
     ) -> None:
+        _ensure_runtime_imports()
+        self._provider_mode = provider_mode
+        self._cloud_provider = cloud_provider
+        self._use_ollama = provider_mode in {"hybrid", "local-only"}
+        self._use_cloud = provider_mode in {"hybrid", "cloud-only"}
+        self._use_grok = self._use_cloud and cloud_provider == "all"
+        # Keep regex fallback only in hybrid mode to preserve strict local/cloud-only behavior.
+        self._use_regex = provider_mode == "hybrid"
+
         ollama_limits = (ollama_rate_limits or {}).get(ollama_model, (0, 0))
         gemini_limits = (gemini_rate_limits or {}).get(gemini_model, (0, 0))
         xai_limits = (xai_rate_limits or {}).get(xai_model, (0, 0))
 
         self._ollama: Optional[OllamaParser] = None
-        if ollama_enabled:
+        if ollama_enabled and self._use_ollama:
             self._ollama = OllamaParser(
                 base_url=ollama_base_url,
                 model=ollama_model,
@@ -593,18 +749,24 @@ class AISignalParser:
                 rpd_limit=ollama_limits[1],
             )
 
-        self._gemini = GeminiParser(
-            api_key=gemini_api_key,
-            model=gemini_model,
-            rpm_limit=gemini_limits[0],
-            rpd_limit=gemini_limits[1],
-        )
-        self._grok = GrokParser(
-            api_key=xai_api_key,
-            model=xai_model,
-            rpm_limit=xai_limits[0],
-            rpd_limit=xai_limits[1],
-        )
+        self._gemini: Optional[GeminiParser] = None
+        if self._use_cloud:
+            self._gemini = GeminiParser(
+                api_key=gemini_api_key,
+                model=gemini_model,
+                rpm_limit=gemini_limits[0],
+                rpd_limit=gemini_limits[1],
+                rate_limits_by_model=gemini_rate_limits,
+            )
+
+        self._grok: Optional[GrokParser] = None
+        if self._use_grok:
+            self._grok = GrokParser(
+                api_key=xai_api_key,
+                model=xai_model,
+                rpm_limit=xai_limits[0],
+                rpd_limit=xai_limits[1],
+            )
         self._regex = RegexParser()
 
         # Track provider health for logging
@@ -639,26 +801,29 @@ class AISignalParser:
                 return None
 
         # Failover to Gemini
-        logger.info("Falling back to Gemini parser...")
-        signal, non_signal = await self._try_provider("gemini", self._gemini, raw_text, message_id)
-        if signal is not None:
-            return signal
-        if non_signal:
-            return None
+        if self._gemini is not None:
+            logger.info("Falling back to Gemini parser...")
+            signal, non_signal = await self._try_provider("gemini", self._gemini, raw_text, message_id)
+            if signal is not None:
+                return signal
+            if non_signal:
+                return None
 
         # Failover to xAI Grok
-        logger.info("Falling back to Grok parser...")
-        signal, non_signal = await self._try_provider("grok", self._grok, raw_text, message_id)
-        if signal is not None:
-            return signal
-        if non_signal:
-            return None
+        if self._grok is not None:
+            logger.info("Falling back to Grok parser...")
+            signal, non_signal = await self._try_provider("grok", self._grok, raw_text, message_id)
+            if signal is not None:
+                return signal
+            if non_signal:
+                return None
 
         # Last resort: regex
-        logger.info("Falling back to regex parser...")
-        signal = self._try_regex(raw_text, message_id)
-        if signal is not None:
-            return signal
+        if self._use_regex:
+            logger.info("Falling back to regex parser...")
+            signal = self._try_regex(raw_text, message_id)
+            if signal is not None:
+                return signal
 
         logger.warning("All parsers failed for message: %s", raw_text[:100])
         return None
@@ -667,6 +832,10 @@ class AISignalParser:
         """Parse with Gemini only (no local/fallback providers)."""
         if not raw_text or len(raw_text.strip()) < 5:
             logger.debug("Skipping empty/tiny message")
+            return None
+
+        if self._gemini is None:
+            logger.warning("Gemini parser is disabled by current provider mode")
             return None
 
         signal, non_signal = await self._try_provider("gemini", self._gemini, raw_text, message_id)
@@ -990,10 +1159,24 @@ class AISignalParser:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
             "AI parser utility: parse pending telegram messages from DB (default), "
             "or parse one provided text."
-        )
+        ),
+        epilog=(
+            "Examples:\n"
+            "  # DB parse with hybrid mode (local + cloud + regex fallback)\n"
+            "  python src/ai_parser.py --mode hybrid --limit 200\n\n"
+            "  # DB parse with local LLM only (Ollama only, no cloud, no regex)\n"
+            "  python src/ai_parser.py --mode local-only --limit 200\n\n"
+            "  # DB parse with cloud AI only (Gemini + xAI, no local, no regex)\n"
+            "  python src/ai_parser.py --mode cloud-only --cloud-provider all --limit 200\n\n"
+            "  # Cloud Gemni-only mode (backward-compatible)\n"
+            "  python src/ai_parser.py --google --limit 200\n\n"
+            "  # One-off text parse with local LLM only\n"
+            "  python src/ai_parser.py --mode local-only --text 'BUY XAUUSD 3320 SL 3310 TP 3340'\n"
+        ),
     )
     parser.add_argument(
         "--text",
@@ -1054,14 +1237,42 @@ def _parse_args() -> argparse.Namespace:
         help="Use Google Gemini only (skip Ollama, xAI, and regex).",
     )
     parser.add_argument(
+        "--mode",
+        choices=["hybrid", "local-only", "cloud-only"],
+        default="hybrid",
+        help=(
+            "Provider execution mode: hybrid (default), local-only (Ollama only), "
+            "cloud-only (Gemini/xAI only)."
+        ),
+    )
+    parser.add_argument(
+        "--cloud-provider",
+        choices=["all", "gemini-only"],
+        default="all",
+        help="Cloud provider selection for cloud/hybrid modes: all (Gemini + xAI) or gemini-only.",
+    )
+    parser.add_argument(
         "--google-model",
         default=GOOGLE_DEFAULT_MODEL,
         help=(
-            "Google model to use with --google (default: gemma-3-4b-it). "
-            "Use full form like models/gemma-3-4b-it or short name."
+            "Google model to use with --google / cloud mode "
+            f"(default: {GOOGLE_DEFAULT_MODEL}). "
+            "Use full form like models/gemma-3n-e2b-it or short name."
         ),
     )
     return parser.parse_args()
+
+
+def _resolve_provider_args(args: argparse.Namespace) -> tuple[str, str]:
+    """Resolve effective provider mode/provider with backward compatibility."""
+    mode = args.mode
+    cloud_provider = args.cloud_provider
+
+    if args.google:
+        mode = "cloud-only"
+        cloud_provider = "gemini-only"
+
+    return mode, cloud_provider
 
 
 def _project_root_dir() -> Path:
@@ -1263,11 +1474,12 @@ async def _parse_pending_db_messages(
 
                     await db.mark_telegram_event_parse_status(
                         event_id,
-                        "FAILED",
+                        "PENDING",
                         parser_source="none",
-                        parse_error="ai provider unavailable or request failed",
+                        parse_error="ai provider unavailable/request failed; deferred for retry",
                     )
-                    stats["failed"] += 1
+                    stats["skipped"] += 1
+                    stats["processed"] += 1
                     continue
 
                 await db.mark_telegram_event_parse_status(
@@ -1315,7 +1527,9 @@ async def _parse_pending_db_messages(
 
 
 async def _run_worker_loop(args: argparse.Namespace) -> None:
+    _ensure_runtime_imports()
     settings = get_settings()
+    provider_mode, cloud_provider = _resolve_provider_args(args)
     selected_gemini_model = args.google_model if args.google else settings.gemini_model
     parser = AISignalParser(
         ollama_enabled=settings.ollama_enabled,
@@ -1328,6 +1542,8 @@ async def _run_worker_loop(args: argparse.Namespace) -> None:
         ollama_rate_limits=settings.ollama_rate_limits_map(),
         gemini_rate_limits=settings.gemini_rate_limits_map(),
         xai_rate_limits=settings.xai_rate_limits_map(),
+        provider_mode=provider_mode,
+        cloud_provider=cloud_provider,
     )
     db = Database(db_path=settings.database_path)
     await db.connect()
@@ -1343,8 +1559,12 @@ async def _run_worker_loop(args: argparse.Namespace) -> None:
         "AI parser worker running "
         f"(interval={interval}s, limit={limit}, include_failed={include_failed})."
     )
-    if args.google:
-        print(f"Google-only mode enabled: model={selected_gemini_model}")
+    print(
+        f"Provider mode: {provider_mode}"
+        + (f" (cloud-provider={cloud_provider})" if provider_mode != "local-only" else "")
+    )
+    if provider_mode != "local-only":
+        print(f"Gemini model: {selected_gemini_model}")
     print("Press Ctrl+C to stop.")
 
     try:
@@ -1377,6 +1597,11 @@ async def _run_worker_loop(args: argparse.Namespace) -> None:
 
 async def _run_cli() -> None:
     args = _parse_args()
+    provider_mode, cloud_provider = _resolve_provider_args(args)
+
+    if any(flag in sys.argv for flag in ("-h", "--help")):
+        # Keep help available even when optional runtime deps are not installed.
+        return
 
     if args.status:
         print(_status_background_worker())
@@ -1396,6 +1621,7 @@ async def _run_cli() -> None:
         await _run_worker_loop(args)
         return
 
+    _ensure_runtime_imports()
     settings = get_settings()
     selected_gemini_model = args.google_model if args.google else settings.gemini_model
     parser = AISignalParser(
@@ -1409,10 +1635,16 @@ async def _run_cli() -> None:
         ollama_rate_limits=settings.ollama_rate_limits_map(),
         gemini_rate_limits=settings.gemini_rate_limits_map(),
         xai_rate_limits=settings.xai_rate_limits_map(),
+        provider_mode=provider_mode,
+        cloud_provider=cloud_provider,
     )
 
-    if args.google:
-        print(f"Google-only mode enabled: model={selected_gemini_model}")
+    print(
+        f"Provider mode: {provider_mode}"
+        + (f" (cloud-provider={cloud_provider})" if provider_mode != "local-only" else "")
+    )
+    if provider_mode != "local-only":
+        print(f"Gemini model: {selected_gemini_model}")
 
     if args.health_check:
         print("[OK] AI parser initialized successfully.")
@@ -1437,7 +1669,7 @@ async def _run_cli() -> None:
     try:
         recovered = await db.recover_processing_telegram_events()
         if recovered > 0:
-            print(f"Recovered {recovered} stale PROCESSING row(s) to FAILED.")
+            print(f"Recovered {recovered} stale PROCESSING row(s) to PENDING.")
         stats = await _parse_pending_db_messages(
             parser=parser,
             db=db,

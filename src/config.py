@@ -70,10 +70,10 @@ class Settings(BaseSettings):
     # ── AI Parser: Gemini ──────────────────────────────────────────────
     gemini_api_key: str = Field(..., description="Google Gemini API key")
     gemini_model: str = Field(
-        "gemma-3-4b-it", description="Google model name for parser"
+        "gemma-3n-e2b-it", description="Google model name for parser"
     )
     gemini_model_rate_limits: str = Field(
-        "gemma-3-4b-it=10/1000,gemini-2.5-flash=5/20",
+        "gemma-3n-e2b-it=30/14400,gemma-3-4b-it=30/14400,gemma-4-26b-a4b-it=15/1500",
         description="Gemini local limits map: model=RPM/RPD,model=RPM/RPD",
     )
 

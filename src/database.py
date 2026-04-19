@@ -344,7 +344,7 @@ class Database:
         cursor = await self.conn.execute(
             """
             UPDATE telegram_messages
-            SET parse_status = 'FAILED',
+            SET parse_status = 'PENDING',
                 parser_source = COALESCE(parser_source, 'none'),
                 parse_error = CASE
                     WHEN COALESCE(parse_error, '') = '' THEN 'recovered from stale PROCESSING state'
